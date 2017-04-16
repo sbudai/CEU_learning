@@ -1,0 +1,2023 @@
+---
+title: 'meetup.com final project'
+author: 'Sandor Budai'
+date: '31, July 2016'
+last date of data collection: '15, July 2016'
+output: html_document
+---
+
+```{r setup, include =  FALSE}
+# knitr::opts_chunk$set(echo=TRUE) 
+```
+  
+  
+#### Let's do necessary settings
+```{r settings, includes=TRUE,warning=FALSE, cache=TRUE}
+require(devtools)
+require(jsonlite)
+require(data.table)
+require(sqldf)
+require(rio)
+require(ggplot2)
+require(cowplot)
+require(ggthemes)
+require(dplyr)
+require(stringr)
+require(NCmisc)
+require(stringi)
+require(scales)
+require(lubridate)
+require(gdata)
+require(grid)
+require(ggmap)
+require(gridExtra)
+require(rgdal) #
+require(OpenStreetMap) #
+require(rworldmap) #
+require(igraph)
+require(network)
+require(maps)
+require(GGally)
+
+options(StringAsFactor =  FALSE)
+options(datatable.verbose = TRUE)
+
+getwd()
+setwd('./CEU_final_project')
+getwd()
+
+# Convert from data frame of counts to data frame of cases.
+# `countcol` is the name of the column containing the counts
+countsToCases <- function(x, countcol = 'WEIGHT') 
+  {
+    # Get the row indices to pull from x
+    idx <- rep.int(seq_len(nrow(x)), x[[countcol]])
+    # Drop count column
+    x[[countcol]] <- NULL
+    # Get the rows from x
+    x[idx, ]
+}
+
+creds <- import('creds.csv')
+Key <- paste('key=', creds[ProjectTitle == 'meetup_com' & AppName == 'network_science', Key], sep = '')
+Sig <- paste('sig=', creds[ProjectTitle == 'meetup_com' & AppName == 'network_science', Signature], sep = '')
+SigId <- paste('sig_id=', creds[ProjectTitle == 'meetup_com' & AppName == 'network_science', SignatureId], sep = '')
+```
+
+
+#### Let's check what kind of categories we have.
+```{r, include = TRUE,warning=FALSE, cache=TRUE}
+categories <- data.table(fromJSON(paste('https://api.meetup.com/2/categories?offset=0&format=json&photo-host=public&page =500&order=shortname&desc=FALSE&', SigId, '&', Sig, sep = ''), flatten = TRUE)[[1]])
+```
+name = 'Tech'  
+id = '34'  
+  
+  
+#### Let's create a list of European country codes
+```{r, cache=TRUE,warning=FALSE,echo=TRUE}
+ecc <- as.data.table(read.csv(file = 'background_infos/European_country_codes.csv', header = TRUE, sep = ';'))
+census <- as.data.table(read.xls('background_infos/WPP2015_POP_F01_1_TOTAL_POPULATION_BOTH_SEXES.xls', header = TRUE))
+setkey(ecc, country, country_name)
+setkey(census, country, country_name)
+ecc <- ecc[census]
+summary(ecc)
+```
+<!-- # http://www.countrycallingcodes.com/iso-country-codes/europe-codes.php -->
+<!-- # http://unstats.un.org/unsd/methods/m49/m49regin.htm#europe  -->
+<!-- # https://esa.un.org/unpd/wpp/DVD/Files/1_Indicators%20(Standard)/EXCEL_FILES/1_Population/WPP2015_POP_F01_1_TOTAL_POPULATION_BOTH_SEXES.XLS  -->
+
+
+Let's save the ecc file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(ecc, 'ecc.RData')
+# ecc <- as.data.table(import('ecc.RData'))
+```  
+  
+  
+#### Let's find all the corresponding techgroups around Oslo
+radius: 1800  
+lat: 59.91  
+lon: 10.75  
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+linkchunk1 <- 'https://api.meetup.com/2/groups?offset='
+linkchunk2 <- paste('&format=json&lon=10.75&category_id=34&photo-host=public&page=500&radius=1800.0&fields=&lat=59.91&order=id&desc=FALSE&', SigId, '&', Sig, sep = '')
+link <- paste(linkchunk1, 0, linkchunk2, sep = '')
+# Let's download the first offset. (literally it is named as 0th.)
+techgroups_raw_list_Oslo <- data.table(fromJSON(link, flatten = TRUE)[[1]])
+meta <- data.table(fromJSON(link, flatten = TRUE)[[2]])
+offset <- floor(as.numeric(unlist(meta[3]))/200)
+for (i in (1:offset))
+{
+  link <- paste(linkchunk1, i, linkchunk2, sep = '')
+  temp <- data.table(fromJSON(link, flatten = TRUE)[[1]])
+  if (length(temp)>0) {techgroups_raw_list_Oslo <- rbind(techgroups_raw_list_Oslo, temp, fill = TRUE)}
+  wait((runif(1, 0, 1)/10000), unit = 's') # this delay helps pulling data without interruption
+}
+```
+  
+  
+Let's drop unnecessary columns
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+summary(techgroups_raw_list_Oslo)
+techgroups_raw_list_Oslo<-techgroups_raw_list_Oslo[, .(id,link,name,urlname,description,join_mode,rating,topics,utc_offset,timezone,created,country, city,lat,lon,visibility,organizer.member_id,organizer.name,members)]
+```
+  
+  
+Let's modify those column names which contains "."
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+summary(techgroups_raw_list_Oslo)
+setnames(techgroups_raw_list_Oslo,'organizer.member_id', 'organizer_member_id')
+setnames(techgroups_raw_list_Oslo,'organizer.name', 'organizer_name')
+```  
+  
+  
+Let's make it distinct
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+setkey(techgroups_raw_list_Oslo, country, visibility, city, created, id, lon, lat, join_mode)
+techgroups_raw_list_Oslo <- unique(techgroups_raw_list_Oslo)
+```
+
+  
+Let's peel HTML code off.
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+for (i in (1: nrow(techgroups_raw_list_Oslo))) 
+{
+  techgroups_raw_list_Oslo[i, description : =  str_replace_all(description, "(\\Q<U+0\\E)(\\d\\d\\d)(\\Q>\\E)", "")] 
+  techgroups_raw_list_Oslo[i, description : =  str_replace_all(description, "&nbsp;", "")]
+  techgroups_raw_list_Oslo[i, description : =  str_replace_all(description, "br&gt;", "")]
+  techgroups_raw_list_Oslo[i, description : =  str_replace_all(description, "&amp;", "")]
+  techgroups_raw_list_Oslo[i, description : =  str_replace_all(description, "amp;", "")]
+  techgroups_raw_list_Oslo[i, description : =  str_replace_all(description, "&lt;", "")]
+  techgroups_raw_list_Oslo[i, description : =  str_replace_all(description, "a href = ;", "")]
+  techgroups_raw_list_Oslo[i, description : =  str_replace_all(description, "document.write", "")]
+  techgroups_raw_list_Oslo[i, description : =  str_replace_all(description, "\\n", "")]
+  techgroups_raw_list_Oslo[i, description : =  str_trim(description)]
+}
+```
+  
+  
+Let's remove the remaining HTML codes
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+techgroups_raw_list_Oslo[, description : =  description %>% str_replace_all("<(.*?)>", "")]
+```  
+  
+  
+Converting the creation date into a more readable format
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+techgroups_raw_list_Oslo[, created : =  as.POSIXct(created/1000, origin = '1970-01-01')]
+```
+  
+  
+Let's save the techgroups_raw_list_Oslo file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(techgroups_raw_list_Oslo, 'techgroups_raw_list_Oslo.RData')
+# techgroups_raw_list_Oslo <- as.data.table(import('techgroups_raw_list_Oslo.RData'))
+```
+  
+  
+Let's start to create the techgroups_list_Oslo file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+techgroups_list_Oslo<-copy(techgroups_raw_list_Oslo)
+```
+  
+  
+Let's drop the not European countries around Oslo
+inner join with European countries  
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+setkey(ecc, country)
+setkey(techgroups_list_Oslo, country)
+techgroups_list_Oslo <- techgroups_list_Oslo[ecc, nomatch = 0]
+```
+    
+  
+dropping the Asian & African timezones around Oslo
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+techgroups_list_Oslo <- techgroups_list_Oslo[!(timezone %like% '^Asia'),]
+techgroups_list_Oslo <- techgroups_list_Oslo[!(timezone %like% '^Africa'),]
+```
+    
+  
+Let's reorder columns
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+summary(techgroups_list_Oslo)
+techgroups_list_Oslo<-techgroups_list_Oslo[, .(id,link,name,urlname,description,join_mode,rating,topics,utc_offset,timezone,created,region,country, country_name,city,lat,lon,visibility,organizer_member_id,organizer_name,members)]
+```
+
+  
+dropping those groups around Oslo which have only one member
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+techgroups_list_Oslo <- techgroups_list_Oslo[members>1, ]
+```
+
+
+Let's save the techgroups_list_Oslo file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(techgroups_list_Oslo, 'techgroups_list_Oslo.RData')
+# techgroups_list_Oslo <- as.data.table(import('techgroups_list_Oslo.RData'))
+```
+
+
+#### Let's find all the corresponding techgroups around Cagliari
+radius: 1600  
+lat: 39.22  
+lon: 9.12  
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+linkchunk1 <- 'https://api.meetup.com/2/groups?offset='
+linkchunk2 <- paste('&format=json&lon=9.12&category_id=34&photo-host=public&page=500&radius=1600.0&fields=&lat=39.22&order=id&desc=FALSE&', SigId, '&', Sig, sep = '')
+link <- paste(linkchunk1, 0, linkchunk2, sep = '')
+# Let's download the first offset. (literally it is named as 0th.)
+techgroups_raw_list_Cagliari <- data.table(fromJSON(link, flatten = TRUE)[[1]])
+meta <- data.table(fromJSON(link, flatten = TRUE)[[2]])
+offset <- floor(as.numeric(unlist(meta[3]))/200)
+for (i in (1:offset))
+{
+  link <- paste(linkchunk1, i, linkchunk2, sep = '')
+  temp <- data.table(fromJSON(link, flatten = TRUE)[[1]])
+  if (length(temp)>0) {techgroups_raw_list_Cagliari <- rbind(techgroups_raw_list_Cagliari, temp, fill = TRUE)}
+  wait((runif(1, 0, 1)/10000), unit = 's') # this delay helps pulling data without interruption
+}
+```
+  
+  
+Let's drop unnecessary columns
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+summary(techgroups_raw_list_Cagliari)
+techgroups_raw_list_Cagliari<-techgroups_raw_list_Cagliari[, .(id,link,name,urlname,description,join_mode,rating,topics,utc_offset,timezone,created,country, city,lat,lon,visibility,organizer.member_id,organizer.name,members)]
+```
+  
+  
+Let's modify those column names which contains "."
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+summary(techgroups_raw_list_Cagliari)
+setnames(techgroups_raw_list_Cagliari,'organizer.member_id', 'organizer_member_id')
+setnames(techgroups_raw_list_Cagliari,'organizer.name', 'organizer_name')
+```  
+  
+  
+Let's make it distinct
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+setkey(techgroups_raw_list_Cagliari, country, visibility, city, created, id, lon, lat, join_mode)
+techgroups_raw_list_Cagliari <- unique(techgroups_raw_list_Cagliari)
+```
+
+  
+Let's peel HTML code off.
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+for (i in (1: nrow(techgroups_raw_list_Cagliari))) 
+{
+  techgroups_raw_list_Cagliari[i, description : =  str_replace_all(description, "(\\Q<U+0\\E)(\\d\\d\\d)(\\Q>\\E)", "")] 
+  techgroups_raw_list_Cagliari[i, description : =  str_replace_all(description, "&nbsp;", "")]
+  techgroups_raw_list_Cagliari[i, description : =  str_replace_all(description, "br&gt;", "")]
+  techgroups_raw_list_Cagliari[i, description : =  str_replace_all(description, "&amp;", "")]
+  techgroups_raw_list_Cagliari[i, description : =  str_replace_all(description, "amp;", "")]
+  techgroups_raw_list_Cagliari[i, description : =  str_replace_all(description, "&lt;", "")]
+  techgroups_raw_list_Cagliari[i, description : =  str_replace_all(description, "a href = ;", "")]
+  techgroups_raw_list_Cagliari[i, description : =  str_replace_all(description, "document.write", "")]
+  techgroups_raw_list_Cagliari[i, description : =  str_replace_all(description, "\\n", "")]
+  techgroups_raw_list_Cagliari[i, description : =  str_trim(description)]
+}
+```
+  
+  
+Let's remove the remaining HTML codes
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+techgroups_raw_list_Cagliari[, description : =  description %>% str_replace_all("<(.*?)>", "")]
+```  
+  
+  
+Converting the creation date into a more readable format
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+techgroups_raw_list_Cagliari[, created : =  as.POSIXct(created/1000, origin = '1970-01-01')]
+```
+  
+  
+Let's save the techgroups_raw_list_Cagliari file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(techgroups_raw_list_Cagliari, 'techgroups_raw_list_Cagliari.RData')
+# techgroups_raw_list_Cagliari <- as.data.table(import('techgroups_raw_list_Cagliari.RData'))
+```
+  
+  
+Let's start to create the techgroups_list_Cagliari file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+techgroups_list_Cagliari<-copy(techgroups_raw_list_Cagliari)
+```
+  
+  
+Let's drop the not European countries around Cagliari
+inner join with European countries  
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+setkey(ecc, country)
+setkey(techgroups_list_Cagliari, country)
+techgroups_list_Cagliari <- techgroups_list_Cagliari[ecc, nomatch = 0]
+```
+    
+  
+dropping the Asian & African timezones around Cagliari
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+techgroups_list_Cagliari <- techgroups_list_Cagliari[!(timezone %like% '^Asia'),]
+techgroups_list_Cagliari <- techgroups_list_Cagliari[!(timezone %like% '^Africa'),]
+```
+    
+  
+Let's reorder columns
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+summary(techgroups_list_Cagliari)
+techgroups_list_Cagliari<-techgroups_list_Cagliari[, .(id,link,name,urlname,description,join_mode,rating,topics,utc_offset,timezone,created,region,country, country_name,city,lat,lon,visibility,organizer_member_id,organizer_name,members)]
+```
+
+  
+dropping those groups around Cagliari which have only one member
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+techgroups_list_Cagliari <- techgroups_list_Cagliari[members>1, ]
+```
+
+
+Let's save the techgroups_list_Cagliari file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(techgroups_list_Cagliari, 'techgroups_list_Cagliari.RData')
+# techgroups_list_Cagliari <- as.data.table(import('techgroups_list_Cagliari.RData'))
+```
+
+
+#### Let's find all the corresponding techgroups around Kharkiv
+radius: 1800  
+lat: 49.99  
+lon: 36.23  
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+linkchunk1 <- 'https://api.meetup.com/2/groups?offset='
+linkchunk2 <- paste('&format=json&lon=36.23&category_id=34&photo-host=public&page=500&radius=1800.0&fields=&lat=49.99&order=id&desc=FALSE&', SigId, '&', Sig, sep = '')
+link <- paste(linkchunk1, 0, linkchunk2, sep = '')
+# Let's download the first offset. (literally it is named as 0th.)
+techgroups_raw_list_Kharkiv <- data.table(fromJSON(link, flatten = TRUE)[[1]])
+meta <- data.table(fromJSON(link, flatten = TRUE)[[2]])
+offset <- floor(as.numeric(unlist(meta[3]))/200)
+for (i in (1:offset))
+{
+  link <- paste(linkchunk1, i, linkchunk2, sep = '')
+  temp <- data.table(fromJSON(link, flatten = TRUE)[[1]])
+  if (length(temp)>0) {techgroups_raw_list_Kharkiv <- rbind(techgroups_raw_list_Kharkiv, temp, fill = TRUE)}
+  wait((runif(1, 0, 1)/10000), unit = 's') # this delay helps pulling data without interruption
+}
+```
+  
+  
+Let's drop unnecessary columns
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+summary(techgroups_raw_list_Kharkiv)
+techgroups_raw_list_Kharkiv<-techgroups_raw_list_Kharkiv[, .(id,link,name,urlname,description,join_mode,rating,topics,utc_offset,timezone,created,country, city,lat,lon,visibility,organizer.member_id,organizer.name,members)]
+```
+  
+  
+Let's modify those column names which contains "."
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+summary(techgroups_raw_list_Kharkiv)
+setnames(techgroups_raw_list_Kharkiv,'organizer.member_id', 'organizer_member_id')
+setnames(techgroups_raw_list_Kharkiv,'organizer.name', 'organizer_name')
+```  
+  
+  
+Let's make it distinct
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+setkey(techgroups_raw_list_Kharkiv, country, visibility, city, created, id, lon, lat, join_mode)
+techgroups_raw_list_Kharkiv <- unique(techgroups_raw_list_Kharkiv)
+```
+
+  
+Let's peel HTML code off.
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+for (i in (1: nrow(techgroups_raw_list_Kharkiv))) 
+{
+  techgroups_raw_list_Kharkiv[i, description : =  str_replace_all(description, "(\\Q<U+0\\E)(\\d\\d\\d)(\\Q>\\E)", "")] 
+  techgroups_raw_list_Kharkiv[i, description : =  str_replace_all(description, "&nbsp;", "")]
+  techgroups_raw_list_Kharkiv[i, description : =  str_replace_all(description, "br&gt;", "")]
+  techgroups_raw_list_Kharkiv[i, description : =  str_replace_all(description, "&amp;", "")]
+  techgroups_raw_list_Kharkiv[i, description : =  str_replace_all(description, "amp;", "")]
+  techgroups_raw_list_Kharkiv[i, description : =  str_replace_all(description, "&lt;", "")]
+  techgroups_raw_list_Kharkiv[i, description : =  str_replace_all(description, "a href = ;", "")]
+  techgroups_raw_list_Kharkiv[i, description : =  str_replace_all(description, "document.write", "")]
+  techgroups_raw_list_Kharkiv[i, description : =  str_replace_all(description, "\\n", "")]
+  techgroups_raw_list_Kharkiv[i, description : =  str_trim(description)]
+}
+```
+  
+  
+Let's remove the remaining HTML codes
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+techgroups_raw_list_Kharkiv[, description : =  description %>% str_replace_all("<(.*?)>", "")]
+```  
+  
+  
+Converting the creation date into a more readable format
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+techgroups_raw_list_Kharkiv[, created : =  as.POSIXct(created/1000, origin = '1970-01-01')]
+```
+  
+  
+Let's save the techgroups_raw_list_Kharkiv file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(techgroups_raw_list_Kharkiv, 'techgroups_raw_list_Kharkiv.RData')
+# techgroups_raw_list_Kharkiv <- as.data.table(import('techgroups_raw_list_Kharkiv.RData'))
+```
+  
+  
+Let's start to create the techgroups_list_Kharkiv file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+techgroups_list_Kharkiv<-copy(techgroups_raw_list_Kharkiv)
+```
+  
+  
+Let's drop the not European countries around Kharkiv
+inner join with European countries  
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+setkey(ecc, country)
+setkey(techgroups_list_Kharkiv, country)
+techgroups_list_Kharkiv <- techgroups_list_Kharkiv[ecc, nomatch = 0]
+```
+    
+  
+dropping the Asian & African timezones around Kharkiv
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+techgroups_list_Kharkiv <- techgroups_list_Kharkiv[!(timezone %like% '^Asia'),]
+techgroups_list_Kharkiv <- techgroups_list_Kharkiv[!(timezone %like% '^Africa'),]
+```
+    
+  
+Let's reorder columns
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+summary(techgroups_list_Kharkiv)
+techgroups_list_Kharkiv<-techgroups_list_Kharkiv[, .(id,link,name,urlname,description,join_mode,rating,topics,utc_offset,timezone,created,region,country, country_name,city,lat,lon,visibility,organizer_member_id,organizer_name,members)]
+```
+
+  
+dropping those groups around Kharkiv which have only one member
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+techgroups_list_Kharkiv <- techgroups_list_Kharkiv[members>1, ]
+```
+
+
+Let's save the techgroups_list_Kharkiv file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(techgroups_list_Kharkiv, 'techgroups_list_Kharkiv.RData')
+# techgroups_list_Kharkiv <- as.data.table(import('techgroups_list_Kharkiv.RData'))
+```  
+
+
+Let's create union of the 3 techgroups_list file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+techgroups_list <- rbind(rbind(techgroups_list_Kharkiv,techgroups_list_Cagliari),techgroups_list_Oslo)
+```
+
+
+Let's make techgroups_list file distinct
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+setkey(techgroups_list, country, visibility, city, created, id, lon, lat, join_mode)
+techgroups_list <- unique(techgroups_list[])
+```
+
+
+Let's save the techgroups_list file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(techgroups_list, 'techgroups_list.RData')
+write.table(techgroups_list[, !'topics', with =  FALSE], file = 'background_infos/techgroups_list.csv',quote = TRUE,sep = '|',eol = '\n',row.names = TRUE,col.names = TRUE)
+## techgroups_list <- as.data.table(import('techgroups_list.RData'))
+```
+
+  
+##### Let's download all the events for all groups in Europe
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+setorder(techgroups_list, id)
+temp <- data.table(fromJSON('https://api.meetup.com/2/events?offset=0&sign=TRUE&photo-host=public&limited_events=TRUE&status=past&group_id=16315032', flatten = TRUE)[[1]])
+techgroups_events_raw_list <- copy(temp[FALSE, ])
+for (l in techgroups_list[, id])
+  {
+  eventlink <- paste('https://api.meetup.com/2/events?offset=0&sign=TRUE&photo-host=public&limited_events=TRUE&status=past&group_id=', l, sep='')
+  meta<-fromJSON(eventlink, flatten = TRUE)[[2]]
+  offset <- floor(as.numeric(unlist(meta[3]))/200)
+  print(l)
+  print((offset+1)*200)
+  for (i in (0:offset))
+    {
+    eventlink <- paste('https://api.meetup.com/2/events?offset=', i, '&sign=TRUE&photo-host=public&limited_events=TRUE&status=past&group_id=', l, sep='')
+    wait((runif(1, 0, 1)/3000), unit = 's') ## this delay helps pulling data without interruption
+    temp<-fromJSON(eventlink, flatten = TRUE)[[1]]
+    if (length(temp)>0) 
+    {techgroups_events_raw_list <- rbindlist(list(techgroups_events_raw_list, temp), use.names = TRUE, fill = TRUE)}
+    }
+  }
+techgroups_events_raw_list <- techgroups_events_raw_list[time<'2015-07-16', ]
+```
+
+
+Let's do some data munging on all the events for all groups in Europe
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+techgroups_events_raw_list[, created : =  as.POSIXct(created/1000, origin = '1970-01-01')]
+techgroups_events_raw_list[, time : =  as.POSIXct(time/1000, origin = '1970-01-01')]
+techgroups_events_raw_list[, updated : =  as.POSIXct(updated/1000, origin = '1970-01-01')]
+techgroups_events_raw_list[, group.created : =  as.POSIXct(group.created/1000, origin = '1970-01-01')]
+techgroups_events_raw_list[, description : =  description %>% str_replace_all("<(.*?)>", "")]
+setnames(techgroups_events_raw_list, 'id', 'event.id')
+setnames(techgroups_events_raw_list, 'name', 'event.name')
+setorder(techgroups_events_raw_list, group.id, time)
+techgroups_events_raw_list <- unique(techgroups_events_raw_list[])
+techgroups_events_raw_list <- techgroups_events_raw_list[as.Date(time)<'2016-07-16', ]
+```
+
+
+Let's save the techgroups_events_raw_list file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(techgroups_events_raw_list, 'techgroups_events_raw_list.RData') 
+# techgroups_events_raw_list<-as.data.table(import('techgroups_events_raw_list.RData'))
+```
+
+
+Let's create the techgroups_events_list file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+techgroups_events_list <- copy(techgroups_events_raw_list[, .(group.id, group.name, group.urlname, event.id, event.name, event_url, yes_rsvp_count, visibility, group.join_mode, status, utc_offset, created, time, updated, rating.count, rating.average)])
+```
+
+
+Let's save the techgroups_events_list file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(techgroups_events_list, 'techgroups_events_list.RData') 
+# techgroups_events_list<-as.data.table(import('techgroups_events_list.RData'))
+```
+
+
+Let's plot the distribution of each yes_rsvp_count per event and the average yes_rsvp_count per group in order to define which size of events can considered as live one.
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+techgroups_events_list <- data.table(import('techgroups_events_list.RData'))
+temp <- techgroups_events_list[, min(time), by = group.id]
+setkey(temp, group.id)
+setkey(techgroups_events_list, group.id)
+temp <- temp[techgroups_events_list, nomatch = 0]
+temp[, V1 : =  NULL]
+
+ggplot(data = temp, 
+       aes(x = yes_rsvp_count)) +
+  geom_histogram(aes(y = ..count..), 
+                 binwidth = 1, 
+                 colour = 'black', 
+                 fill = 'white') +
+  scale_x_continuous(limits = c(-0.6, temp[, max(yes_rsvp_count)]), 
+                     breaks = seq(0, temp[, max(yes_rsvp_count)], 20),
+                     labels = seq(0, temp[, max(yes_rsvp_count)], 20)) +
+  xlab('') +
+  ggtitle('yes_rsvp_count by event')
+
+ggplot(data = temp, aes(x = yes_rsvp_count)) +
+  geom_histogram(aes(y = ..count..), binwidth = 1, colour = 'black', fill = 'white') +
+  scale_x_continuous(limits = c(-0.6, temp[, ceiling(mean(yes_rsvp_count))]), 
+                     breaks = seq(0, temp[, round(mean(yes_rsvp_count))], 2),
+                     labels = seq(0, temp[, round(mean(yes_rsvp_count))], 2)) +
+  xlab('') +
+  ggtitle('yes_rsvp_count by event - zoom in')
+
+ggplot(data = temp, aes(x = log(yes_rsvp_count+.01))) +
+  geom_histogram(aes(y = ..count..), 
+                 binwidth = .4, 
+                 colour = 'black', 
+                 fill = 'white') +
+  scale_x_continuous(limits = c(-5, temp[, log(max(yes_rsvp_count))]), 
+                     breaks = log(seq(0.01, temp[, max(yes_rsvp_count)+0.01], 1)),
+                     labels = seq(0, temp[, max(yes_rsvp_count)], 1)) +
+  xlab('') +
+  ggtitle('yes_rsvp_count by event')+
+  geom_vline(aes(xintercept = log(0.01)), 
+             linetype = 'dashed', 
+             size = .2, 
+             colour = '#e50000') +
+  geom_vline(aes(xintercept = log(1.01)), 
+             linetype = 'dashed', 
+             size = .3, 
+             colour = '#cc0000') +
+  geom_vline(aes(xintercept = log(2.01)), 
+             linetype = 'dashed', 
+             size = .4, 
+             colour = '#b20000') +
+  geom_vline(aes(xintercept = log(3.01)), 
+             linetype = 'dashed', 
+             size = .5, 
+             colour = '#990000') +
+  geom_vline(aes(xintercept = log(4.01)), 
+             linetype = 'dashed', 
+             size = .6, 
+             colour = '#7f0000')
+
+temp2 <- temp[, .N, by = group.id]
+setnames(temp2, 'N', 'event.count')
+temp <- temp[, mean(yes_rsvp_count), by = group.id]
+setnames(temp, 'V1', 'yes_rsvp_count.average')
+setkey(temp, group.id)
+setkey(temp2, group.id)
+temp <- temp2[temp, nomatch = NA]
+
+ggplot(data = temp, 
+       aes(x = yes_rsvp_count.average)) +
+  geom_histogram(aes(y = ..count..), 
+                 binwidth = 1, 
+                 colour = 'black', 
+                 fill = 'white') +
+  scale_x_continuous(limits = c(-0.6, temp[, ceiling(max(yes_rsvp_count.average))]), 
+                     breaks = seq(0, temp[, round(max(yes_rsvp_count.average))], 20),
+                     labels = seq(0, temp[, round(max(yes_rsvp_count.average))], 20)) +
+  xlab('') +
+  ggtitle('average yes_rsvp_count by group')
+
+ggplot(data = temp, 
+       aes(x = yes_rsvp_count.average)) +
+  geom_histogram(aes(y = ..count..), 
+                 binwidth = 1, 
+                 colour = 'black', 
+                 fill = 'white') +
+  scale_x_continuous(limits = c(-0.6, temp[, ceiling(mean(yes_rsvp_count.average))]), 
+                     breaks = seq(0, temp[, round(mean(yes_rsvp_count.average))], 2),
+                     labels = seq(0, temp[, round(mean(yes_rsvp_count.average))], 2)) +
+  xlab('') +
+  ggtitle('average yes_rsvp_count by group - zoom in')
+
+ggplot(data = temp, 
+       aes(x = log(yes_rsvp_count.average+.01))) +
+  geom_histogram(aes(y = ..count..), 
+                 binwidth = .1, 
+                 colour = 'black', 
+                 fill = 'white') +
+  scale_x_continuous(limits = c(-5, temp[, log(max(yes_rsvp_count.average))]), 
+                     breaks = log(seq(0.01, temp[, max(yes_rsvp_count.average)+0.01], 1)),
+                     labels = seq(0, temp[, max(yes_rsvp_count.average)], 1)) +
+  xlab('') +
+  ggtitle('average yes_rsvp_count by group')+
+  geom_vline(aes(xintercept = log(0.01)), 
+             linetype = 'dashed', 
+             size = .2, 
+             colour = '#e50000') +
+  geom_vline(aes(xintercept = log(1.01)), 
+             linetype = 'dashed', 
+             size = .3, 
+             colour = '#cc0000') +
+  geom_vline(aes(xintercept = log(2.01)), 
+             linetype = 'dashed', 
+             size = .4, 
+             colour = '#b20000') +
+  geom_vline(aes(xintercept = log(3.01)), 
+             linetype = 'dashed', 
+             size = .5, 
+             colour = '#990000') +
+  geom_vline(aes(xintercept = log(4.01)), 
+             linetype = 'dashed', 
+             size = .6, 
+             colour = '#7f0000') +
+  geom_vline(aes(xintercept = log(mean(yes_rsvp_count.average))), 
+             linetype = 'dashed', 
+             size = .7, 
+             colour = 'red')
+```
+It seems's that above 2 pieces of 'yes' are the real events.
+
+
+Let's create the live_techgroups_events_list file by filtering out those events which have less than 2 yes RSVP
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+live_techgroups_events_list <- copy(techgroups_events_list[yes_rsvp_count>2, ])
+```
+I think there is no real event under 3 yes RSVP
+
+
+Let's save the live_techgroups_events_list file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(live_techgroups_events_list, 'live_techgroups_events_list.RData') 
+# live_techgroups_events_list<-as.data.table(import('live_techgroups_events_list.RData'))
+```
+
+
+Let's check the difference after trimming those events with under 3 participants
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+temp <- live_techgroups_events_list[, sum(yes_rsvp_count), by = group.id]
+setnames(temp, 'V1', 'trimmed')
+temp2 <- techgroups_events_list[, sum(yes_rsvp_count), by = group.id]
+setnames(temp2, 'V1', 'full')
+temp2 <- temp2[full>0, ]
+setkey(temp, group.id)
+setkey(temp2, group.id)
+temp <- temp[temp2, nomatch = NA]
+temp[is.na(trimmed) ==   TRUE, trimmed : =  0]
+temp[, diff : =  full-trimmed]
+temp[, diff.rate : =  round(diff/full*100, 2)]
+temp <- temp[order(-diff, -diff.rate)]
+View(temp)
+ggplot(data = temp, 
+       aes(x = log(diff+.01))) +
+  geom_histogram(aes(y = ..count..), 
+                 binwidth = .1, 
+                 colour = 'black', 
+                 fill = 'white') +
+  scale_x_continuous(limits = c(-5, temp[, log(max(diff))]), 
+                     breaks = log(seq(0.01, temp[, max(diff)+0.01], 1)),
+                     labels = seq(0, temp[, max(diff)], 1)) +
+  xlab('') +
+  ggtitle('difference of full and trimmed by group')+
+  geom_vline(aes(xintercept = log(mean(diff))), 
+             linetype = 'dashed', 
+             size = .7, 
+             colour = 'red')
+```
+There are some weird techgroups but it is OK all-together
+
+
+##### Let's download all the live event participations 
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+temp <- live_techgroups_events_list[, .(group.id, group.name, group.urlname, event.id, event.name)]
+# temp[58896, .(event.id, group.urlname, link.short)] ## törlendő
+temp[, link.short : =  paste('https://api.meetup.com/',group.urlname,'/events/',event.id,'', sep = '')]
+temp[, link.long : =  paste('https://api.meetup.com/',group.urlname,'/events/',event.id,'/rsvps?photo-host=public&', SigId, '&response=yes&', Sig, sep = '')]
+setorder(temp, event.id)
+temp2 <- data.table(fromJSON(temp[1, link.short], flatten = TRUE))
+live_participation_list <- copy(temp2[FALSE, ]) 
+# nrow(temp[event.id<= '228256701', ]) ## törlendő
+for (k in 58890:temp[, .N]) ## ezt minden megszakadásnál újra kell definiálni
+  {
+  tryCatch(
+    {
+    print(k)
+    wait((runif(1, 0, 1)/3000), unit = 's') ## this delay helps pulling data without interruption
+    temp2<-fromJSON(temp[k, link.short], flatten = TRUE)
+    if (length(temp2)>0) {live_participation_list <- rbindlist(list(live_participation_list, temp2), use.names = TRUE, fill = TRUE)}
+    if (k/500-round(k/500,0) ==  0) {export(live_participation_list, 'live_participation_list.RData')}
+    }, error = function(e){})
+  }
+live_participation_list <- unique(live_participation_list)
+export(live_participation_list, 'live_participation_list.RData')  ## az utsó néhány sort még hozzá kellene menteni, de egyébként törlendő
+```
+
+
+Let's do some further modification on live_participation_list file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+live_participation_list[, created : =  as.POSIXct(created/1000, origin = '1970-01-01')]
+live_participation_list[, updated : =  as.POSIXct(updated/1000, origin = '1970-01-01')]
+live_participation_list[, event.time : =  as.POSIXct(event.time/1000, origin = '1970-01-01')]
+setnames(live_participation_list, 'created', 'rsvp.created')
+setnames(live_participation_list, 'updated', 'rsvp.updated')
+live_participation_list <- live_participation_list[, .(rsvp.created, rsvp.updated, response, guests, member.id, member.name, member.role, event.id, event.name, event.yes_rsvp_count, event.time, event.utc_offset, group.id, group.urlname, group.name, group.members, group.join_mode, venue.id, venue.name, venue.lat, venue.lon, venue.country, venue.localized_country_name, venue.city)]
+live_participation_list[, person_participation.count : =  .N, by = member.id]
+setorder(live_participation_list, member.id, group.id, event.time)
+```
+
+
+Let's save the live_participation_list file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(live_participation_list, 'live_participation_list.RData')
+write.table(live_participation_list, file = 'background_infos/live_participation_list.csv', sep = '|', row.names = FALSE)
+## live_participation_list <- as.data.table(import('live_participation_list.RData'))
+```
+
+
+Based on warnings let's sort out those dead groups & events into dead_events table 
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+dead_events <- live_techgroups_events_list[group.urlname ==  'Open-Earth-Berlin', group.id, event.id]
+dead_events <- rbindlist(list(dead_events, live_techgroups_events_list[group.urlname ==  'Gamification-Paris', group.id, event.id]), use.names = TRUE, fill = TRUE)
+dead_events <- rbindlist(list(dead_events, live_techgroups_events_list[group.urlname ==  'Exeter-Online-Privacy-Meetup', group.id, event.id]), use.names = TRUE, fill = TRUE)
+dead_events <- rbindlist(list(dead_events, live_techgroups_events_list[group.urlname ==  'Magento-Meetup-DK', group.id, event.id]), use.names = TRUE, fill = TRUE)
+dead_events <- rbindlist(list(dead_events, live_techgroups_events_list[group.urlname ==  'Silesian-BEAMers', group.id, event.id]), use.names = TRUE, fill = TRUE)
+dead_events <- rbindlist(list(dead_events, live_techgroups_events_list[group.urlname ==  'Dorking-design-and-development', group.id, event.id]), use.names = TRUE, fill = TRUE)
+dead_events <- rbindlist(list(dead_events, live_techgroups_events_list[group.urlname ==  'London-Cyber-Security-Roundtable', group.id, event.id]), use.names = TRUE, fill = TRUE)
+dead_events <- rbindlist(list(dead_events, live_techgroups_events_list[group.urlname ==  'Hertford-Tech', group.id, event.id]), use.names = TRUE, fill = TRUE)
+dead_events <- rbindlist(list(dead_events, live_techgroups_events_list[group.urlname ==  'Silicon-Triangle', group.id, event.id]), use.names = TRUE, fill = TRUE)
+dead_events <- rbindlist(list(dead_events, live_techgroups_events_list[group.urlname ==  'Bergen-Nerdschool', group.id, event.id]), use.names = TRUE, fill = TRUE)
+dead_events <- rbindlist(list(dead_events, live_techgroups_events_list[group.urlname ==  'London-Synth-DIY', group.id, event.id]), use.names = TRUE, fill = TRUE) ## 4 times
+dead_events <- rbindlist(list(dead_events, live_techgroups_events_list[group.urlname ==  'Epsom-Tableau-User-Group-Meetup', group.id, event.id]), use.names = TRUE, fill = TRUE)
+dead_events <- rbindlist(list(dead_events, live_techgroups_events_list[group.urlname ==  'codecave', group.id, event.id]), use.names = TRUE, fill = TRUE)
+dead_events <- rbindlist(list(dead_events, live_techgroups_events_list[group.urlname ==  'Lean-Coffee-London', group.id, event.id]), use.names = TRUE, fill = TRUE)
+dead_events <- rbindlist(list(dead_events, live_techgroups_events_list[group.urlname ==  'basiux-openai-lisbon', group.id, event.id]), use.names = TRUE, fill = TRUE)
+dead_events <- rbindlist(list(dead_events, live_techgroups_events_list[group.urlname ==  'Startup-Bonn', group.id, event.id]), use.names = TRUE, fill = TRUE)
+dead_events <- rbindlist(list(dead_events, live_techgroups_events_list[group.urlname ==  'blogup-berlin', group.id, event.id]), use.names = TRUE, fill = TRUE)
+dead_events <- rbindlist(list(dead_events, live_techgroups_events_list[group.urlname ==  'Essex-Programmers-Meetup', group.id, event.id]), use.names = TRUE, fill = TRUE)
+dead_events <- rbindlist(list(dead_events, live_techgroups_events_list[group.urlname ==  'OK-Lab-Chemnitz', group.id, event.id]), use.names = TRUE, fill = TRUE)
+dead_events <- rbindlist(list(dead_events, live_techgroups_events_list[group.urlname ==  'kentweb', group.id, event.id]), use.names = TRUE, fill = TRUE)
+dead_events <- rbindlist(list(dead_events, live_techgroups_events_list[group.urlname ==  'Utrecht-rb', group.id, event.id]), use.names = TRUE, fill = TRUE)
+dead_events <- rbindlist(list(dead_events, live_techgroups_events_list[group.urlname ==  'Lyon-Ruby-Brigade', group.id, event.id]), use.names = TRUE, fill = TRUE)
+dead_events <- rbindlist(list(dead_events, live_techgroups_events_list[group.urlname ==  'opentechschool-berlin', group.id, event.id]), use.names = TRUE, fill = TRUE)
+```
+
+
+Based on warnings let's drop those dead events live_techgroups_events_list files 
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+setkey(live_techgroups_events_list, event.id)
+setnames(dead_events, 'group.id', 'N')
+setkey(dead_events, event.id)
+live_techgroups_events_list <- dead_events[live_techgroups_events_list]
+live_techgroups_events_list <- live_techgroups_events_list[is.na(N) ==   TRUE, ]
+live_techgroups_events_list[, N : =  NULL]
+```
+
+
+Let's save the live_techgroups_events_list file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(live_techgroups_events_list, 'live_techgroups_events_list.RData') 
+# live_techgroups_events_list<-as.data.table(import('live_techgroups_events_list.RData'))
+```
+
+
+Let's create live_techgroups_list file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+live_techgroups_list <- copy(unique(live_techgroups_events_list))
+live_techgroups_list[, sum.rating.count : =  sum(rating.count), by = group.id]
+live_techgroups_list[sum.rating.count ==  0, sum.rating.count : =  NA]
+live_techgroups_list[, sum.rating : =  sum(round(rating.count*rating.average,0)), by = group.id]
+live_techgroups_list[, yes.rsvp.count : =  sum(yes_rsvp_count), by = group.id]
+live_techgroups_list[, first.event.date : =  min(time), by = group.id]
+live_techgroups_list[, last.event.date : =  max(time), by = group.id]
+live_techgroups_list[, live.event.count : =  .N, by = group.id]
+live_techgroups_list[, c('event.id', 'event.name', 'event_url', 'yes_rsvp_count', 'status', 'utc_offset', 'created', 'time', 'updated', 'rating.count', 'rating.average') : =  NULL]
+live_techgroups_list <- unique(live_techgroups_list)
+live_techgroups_list[, rating.average : =  round(sum.rating/sum.rating.count, 2)]
+live_techgroups_list[, sum.rating.count : =  NULL]
+live_techgroups_list[, sum.rating : =  NULL]
+live_techgroups_list[, animate: = 'progressing']
+live_techgroups_list[first.event.date> = '2015-07-16', animate: = 'progressing - new']
+live_techgroups_list[last.event.date<'2016-01-16', animate: = 'sleeping']
+live_techgroups_list[last.event.date<'2015-07-16', animate: = 'dead']
+live_techgroups_list[, days.span : =  round(difftime(last.event.date, first.event.date)/86400, 2)]
+live_techgroups_list[, current.age : =  floor(difftime('2016-07-16', first.event.date)/24/365)]
+live_techgroups_list[, animate.years : =  floor(difftime(last.event.date, first.event.date)/86400/365)]
+live_techgroups_list[, yearly.event.count : =  round(live.event.count/(as.numeric(animate.years)+1), 1)]
+live_techgroups_list <- unique(live_techgroups_list)
+temp <- unique(techgroups_list[, .(id, created, members, country, country_name, city, lat, lon, organizer_member_id, organizer_name, topics)])
+setnames(temp, 'organizer_member_id', 'organizer.id')
+setnames(temp, 'members', 'members.count')
+setnames(temp, 'id', 'group.id')
+setnames(temp, 'organizer_name', 'organizer.name')
+temp[, organizer.name : =  stri_trans_general(organizer.name, 'Latin-ASCII')]
+temp[, created.year : =  as.numeric(format(created,"%Y"))]
+temp[, created.yearmonth : =  as.numeric(format(created,"%Y%m"))]
+temp[, first.event.year : =  as.numeric(format(first.event.date,"%Y"))]
+temp[, first.event.yearmonth : =  as.numeric(format(first.event.date,"%Y%m"))]
+temp[, last.event.year : =  as.numeric(format(last.event.date,"%Y"))]
+temp[, last.event.yearmonth : =  as.numeric(format(last.event.date,"%Y%m"))]
+temp[, city : =  stri_trans_general(city, 'Latin-ASCII')]
+setkey(temp, group.id)
+setkey(live_techgroups_list, group.id)
+live_techgroups_list <- unique(live_techgroups_list[temp, nomatch = 0])
+live_techgroups_list <- live_techgroups_list[, .(group.id, group.name, group.urlname, group.join_mode, visibility, animate, days.span, animate.years, current.age, created.year, created.yearmonth, created, first.event.year, first.event.yearmonth, first.event.date, last.event.year, last.event.yearmonth, last.event.date, live.event.count, yearly.event.count, members.count, yes.rsvp.count, rating.average, country, country_name, city, lat, lon, organizer.id, organizer.name)]
+```
+
+
+Let's save the live_techgroups_list file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(live_techgroups_list, 'live_techgroups_list.RData')
+write.table(live_techgroups_list, file = 'background_infos/live_techgroups_list.csv', sep = ';', row.names = FALSE)
+# live_techgroups_list<-as.data.table(import('live_techgroups_list.RData'))
+```
+
+
+Let's do create live_techgroups_topics file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+temp <- techgroups_list[, .(id, name, topics)]
+setnames(temp, 'id', 'group.id')
+setnames(temp, 'name', 'group.name')
+setkey(temp, group.id)
+temp2 <- unique(live_techgroups_list[, .(group.id, visibility, animate)])
+setnames(temp2, 'visibility', 'group.visibility')
+setnames(temp2, 'animate', 'group.animate')
+setkey(temp2, group.id)
+t <- unique(temp[temp2, nomatch = 0])
+live_techgroups_topics <- NULL
+for (i in (1:nrow(t)))
+  {
+  if (length(t[i, topics][1]) > 0)
+    {
+    temp <- cbind(as.data.table(unlist(t[i, topics], recursive =  FALSE, use.names = TRUE)), t[i, ])
+    live_techgroups_topics <- rbindlist(list(live_techgroups_topics, temp[, !'topics', with =  FALSE]), use.names = TRUE, fill = TRUE)
+    }
+  }
+setnames(live_techgroups_topics, 'urlkey', 'topic.urlkey')
+setnames(live_techgroups_topics, 'name', 'topic.name')
+setnames(live_techgroups_topics, 'id', 'topic.id')
+live_techgroups_topics[, topic.name : =  stri_trans_totitle(topic.name)]
+live_techgroups_topics[, topic.sum.group : =  .N, by = topic.id]
+live_techgroups_topics[, group.sum_topic : =  .N, by = group.id]
+temp <- live_techgroups_events_list[, .N, group.id]
+setnames(temp, 'N', 'event.count')
+setkey(temp, group.id)
+temp2 <- live_techgroups_events_list[, sum(yes_rsvp_count), group.id]
+setnames(temp2, 'V1', 'participant.count')
+setkey(temp2, group.id)
+temp3 <- live_participation_list[response ==  'yes', .N, by = group.id]
+setnames(temp3, 'N', 'real.participant.count')
+setkey(temp3, group.id)
+setkey(live_techgroups_topics, group.id)
+live_techgroups_topics<-temp3[temp2[temp[live_techgroups_topics]]]
+live_techgroups_topics <- live_techgroups_topics[, .(topic.id, topic.name, topic.urlkey, topic.sum.group, group.id, group.name, group.visibility, group.animate, group.sum_topic, event.count, participant.count, real.participant.count)]
+setorder(live_techgroups_topics, -topic.count, -participant.count, -real.participant.count, group.id)
+```
+
+
+Let's save the live_techgroups_topics file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(live_techgroups_topics,'live_techgroups_topics.RData')
+# live_techgroups_topics<-as.data.table(import('live_techgroups_topics.RData'))
+```
+
+
+Let's create a unique topic list 
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+unique_live_topics_list <- live_techgroups_topics[, .(topic.id, topic.name, topic.urlkey, topic.sum_group, event.count, participant.count, real.participant.count)]
+setnames(unique_live_topics_list,'topic.sum_group', 'group.count')
+unique_live_topics_list[, topic.name : =  stri_trans_totitle(topic.name)]
+unique_live_topics_list[, event.count : =  sum(event.count), by = topic.id]
+unique_live_topics_list[, participant.count : =  sum(participant.count), by = topic.id]
+unique_live_topics_list[, real.participant.count : =  sum(real.participant.count, na.rm = TRUE), by = topic.id]
+unique_live_topics_list <- unique(unique_live_topics_list)
+setorder(unique_live_topics_list, -group.count, -real.participant.count)
+```
+
+
+Let's save the unique_live_topics_list file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(unique_live_topics_list, 'unique_live_topics_list.RData')
+write.table(unique_live_topics_list, file = 'background_infos/unique_live_topics_list.csv', sep = '|', row.names = FALSE)
+## unique_live_topics_list <- as.data.table(import('unique_live_topics_list.RData'))
+```
+
+
+Let's create a live_participant_list file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+live_participant_list <- live_participation_list[, !c('response', 'event.name', 'event.yes_rsvp_count', 'event.utc_offset', 'group.urlname', 'group.name', 'group.members', 'group.join_mode', 'venue.id', 'venue.name', 'venue.lat', 'venue.lon', 'venue.country', 'venue.localized_country_name', 'venue.city', 'person_participation.count'), with =  FALSE]
+live_participant_list[, first.rsvp.created : =  min(rsvp.created), by = member.id]
+live_participant_list[, rsvp.created : =  NULL]
+live_participant_list[, last.rsvp.updated : =  max(rsvp.updated), by = member.id]
+live_participant_list[, rsvp.updated : =  NULL]
+live_participant_list[, first.event.time : =  min(event.time), by = member.id]
+live_participant_list[, last.event.time : =  max(event.time), by = member.id]
+live_participant_list[, event.time : =  NULL]
+live_participant_list[, guests.count : =  sum(guests), by = member.id]
+live_participant_list[, guests : =  NULL]
+temp <- live_participant_list[is.na(member.role) ==   FALSE, .(member.id, member.role, group.id, event.id)]
+unique(live_participant_list[is.na(member.role) ==   FALSE, member.role])
+temp[, event.count : =  .N, by = .(member.id, group.id, member.role)]
+temp <- unique(temp[, event.id : =  NULL])
+temp[, event.count : =  sum(event.count), by = .(member.id, member.role)]
+temp[, group.count : =  .N, by = .(member.id, member.role, event.count)]
+temp <- unique(temp[, group.id : =  NULL])
+temp[member.role ==  'event_organizer', group.count : =  NA]
+temp <-reshape(temp, direction = 'wide', idvar = 'member.id', timevar = 'member.role')
+temp <- temp[, .(member.id, group.count.organizer, event.count.organizer, group.count.coorganizer, event.count.coorganizer, group.count.assistant_organizer, event.count.assistant_organizer, event.count.event_organizer)]
+setkey(temp, member.id)
+live_participant_list[, ` : =  `(event.count = .N), by = member.id]
+live_participant_list[, event.id : =  NULL]
+live_participant_list[, member.role : =  NULL]
+live_participant_list <- unique(live_participant_list)
+live_participant_list[, ` : =  `(group.count = .N), by = member.id]
+live_participant_list[, group.id : =  NULL]
+live_participant_list <- unique(live_participant_list)
+setkey(live_participant_list, member.id)
+live_participant_list <- temp[live_participant_list]
+setnames(live_participant_list, 'group.count.organizer', 'organized.groups')
+setnames(live_participant_list, 'event.count.organizer', 'organized.events')
+setnames(live_participant_list, 'group.count.coorganizer', 'coorganized.groups')
+setnames(live_participant_list, 'event.count.coorganizer', 'coorganized.events')
+setnames(live_participant_list, 'group.count.assistant_organizer', 'assistant.organized.groups')
+setnames(live_participant_list, 'event.count.assistant_organizer', 'assistant.organized.events')
+setnames(live_participant_list, 'event.count.event_organizer', 'event_organized.events')
+```
+
+
+Let's save the live_participant_list file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(live_participant_list, 'live_participant_list.RData')
+## live_participant_list <- as.data.table(import('live_participant_list.RData'))
+```
+
+
+Let's download all the members from all live groups
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+sample <- data.table(fromJSON(paste('https://api.meetup.com/2/members?', Key, '&sign=TRUE&format=json&order=name&group_id=44695&offset=0', sep = ''), flatten = TRUE)[[1]])
+sample[, group.id: = '44695']
+sample <- sample[, .(id, name, status, country, hometown, city, lat, lon, group.id, joined)]
+temp <- sample[0]
+m <- 0
+live_techgroups_members_list <- sample[0]
+setorder(live_techgroups_list, group.id)
+for (g in live_techgroups_list[, group.id])
+  {
+  tryCatch({
+  memberlink <- paste('https://api.meetup.com/2/members?', Key, '&sign=TRUE&format=json&order=name&group_id=', g, '&offset=0', sep = '')
+  t0 <- fromJSON(memberlink, flatten = TRUE)
+  t <- as.data.table(t0[[1]])
+  t[, group.id : =  g]
+  temp <- copy(t[, .(id, name, status, country, hometown, city, lat, lon, group.id, joined)])
+  wait((runif(1, 0, 1)/3000), unit = 's') ## this delay helps pulling data without interruption
+  offset <- floor(t0[[2]][[3]]/200)
+  if (offset>0)
+    {
+    for (o in 1:offset)
+      {
+      tryCatch({
+      wait((runif(1, 0, 1)/3000), unit = 's') ## this delay helps pulling data without interruption
+      memberlink2 <- paste('https://api.meetup.com/2/members?', Key, '&sign=TRUE&format=json&order=name&group_id=', g, '&offset=', o, sep = '')
+      t <- copy(data.table(fromJSON(memberlink, flatten = TRUE)[[1]]))
+      t[, group.id : =  g]
+      temp2 <-t[, .(id, name, status, country, hometown, city, lat, lon, group.id, joined,)]
+      if (length(temp2)>0) {temp <- rbindlist(list(temp, temp2), use.names = TRUE, fill = TRUE)}
+      }, error = function(e){})
+      }
+    }
+  if (length(temp)>0) 
+    {
+    live_techgroups_members_list <- rbindlist(list(live_techgroups_members_list, temp), use.names = TRUE, fill = TRUE)
+    print(g)
+    m <- m+1
+    if ((m/500) ==  round(m/500, digits = 0)) 
+      {export(live_techgroups_members_list, 'live_techgroups_members_list.RData')}
+    }
+  }, error = function(e){})
+  }
+
+live_techgroups_members_list[, joined : =  as.POSIXct(joined/1000, origin = '1970-01-01')]
+setnames(live_techgroups_members_list, 'name' ,'member.name')
+setnames(live_techgroups_members_list, 'id', 'member.id')
+live_techgroups_members_list[, member.name : =  stri_trans_general(member.name, 'Latin-ASCII')]
+live_techgroups_members_list[, hometown : =  stri_trans_general(hometown, 'Latin-ASCII')]
+live_techgroups_members_list[, city : =  stri_trans_general(city, 'Latin-ASCII')]
+setkey(live_techgroups_members_list, member.id, group.id)
+live_techgroups_members_list <- unique(live_techgroups_members_list)
+```
+
+
+Let's save the city_sum_members file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(live_techgroups_members_list, 'live_techgroups_members_list.RData')
+# live_techgroups_members_list <- as.data.table(import('live_techgroups_members_list.RData'))
+```
+
+
+Let's sum up members of live groups on countries
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+live_country_sum_members <- data.table(live_techgroups_list[, sum(members.count), by = country])  
+setnames(live_country_sum_members, 'V1', 'membership.sum')
+live_country_sum_members <- live_country_sum_members[order(-membership.sum)]
+```
+
+
+Let's save the live_country_sum_members file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(live_country_sum_members, 'live_country_sum_members.RData')
+# live_country_sum_members <- as.data.table(import('live_country_sum_members.RData'))
+```
+
+
+Let's sum up participants of live groups on countries
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+setkey(live_participant_list, member.id)
+setkey(live_techgroups_members_list, member.id)
+temp <- live_techgroups_members_list[live_participant_list, nomatch = 0]
+temp <- unique(temp[, .(member.id, group.id)])
+temp[, group.id : =  as.integer(group.id)]
+setkey(temp, group.id)
+setkey(live_techgroups_list, group.id)
+temp <- live_techgroups_list[temp, nomatch = 0]
+temp <- temp[, .(member.id, group.id, country, country_name, city)]
+live_country_sum_participants <- data.table(temp[, .N, by = country])  
+setnames(live_country_sum_participants, 'N', 'participant.sum')
+live_country_sum_participants <- live_country_sum_participants[order(-participant.sum)]
+```
+
+
+Let's save the live_country_sum_participants file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(live_country_sum_participants, 'live_country_sum_participants.RData')
+# live_country_sum_participants <- as.data.table(import('live_country_sum_participants.RData'))
+```
+
+
+Let's sum up members of live groups on cities
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+live_city_sum_members <- data.table(live_techgroups_list[, sum(members.count), by = .(country, city)])
+setnames(live_city_sum_members, 'V1', 'membership.sum')
+live_city_sum_members[, city : =  stri_trans_general(city, 'Latin-ASCII')]
+live_city_sum_members <- live_city_sum_members[order(-membership.sum)]
+```
+
+
+Let's save the live_city_sum_members file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(live_city_sum_members, 'live_city_sum_members.RData')
+# live_city_sum_members <- as.data.table(import('live_city_sum_members.RData'))
+```
+
+
+Let's sum up participants of live groups on cities
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+setkey(live_participant_list, member.id)
+setkey(live_techgroups_members_list, member.id)
+temp <- live_techgroups_members_list[live_participant_list, nomatch = 0]
+temp <- unique(temp[, .(member.id, group.id)])
+temp[, group.id : =  as.integer(group.id)]
+setkey(temp, group.id)
+setkey(live_techgroups_list, group.id)
+temp <- live_techgroups_list[temp, nomatch = 0]
+temp <- temp[, .(member.id, group.id, country, country_name, city)]
+live_city_sum_participants <- data.table(temp[, .N, by = .(country,city)])  
+setnames(live_city_sum_participants, 'N', 'participant.sum')
+live_city_sum_participants <- live_city_sum_participants[order(-participant.sum)]
+```
+
+
+Let's save the live_city_sum_participants file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(live_city_sum_participants, 'live_city_sum_participants.RData')
+# live_city_sum_participants <- as.data.table(import('live_city_sum_participants.RData'))
+```
+
+
+# Let's see the evolutions of tech meetups through years and months over by countries
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+live_techgroups_members_list <- as.data.table(import('live_techgroups_members_list.RData'))
+ltml <- copy(live_techgroups_members_list[, .(group.id, member.id, joined)])
+ltml[, ': = ' (joined = format(joined, format = '%Y%m'), group.id = as.integer(group.id))]
+ltml[, nr.of.new.members : =  .N, by = .(group.id, joined)]
+ltml[, member.id : =  NULL]
+setkey(ltml, group.id, joined, nr.of.new.members)
+ltml <- unique(ltml)
+ltml[, ': = ' (first.join = min(joined), last.join = max(joined)), by = group.id] # the year&month of application of pioneer members
+sample <- data.table(group.id = as.integer(0), joined = as.character(''), nr.of.new.members = as.numeric(0), first.join = as.character(''), last.join = as.character(''))
+tempgroup <- sample[!1,]
+for (gr in ltml[, unique(group.id)])  # gr<-44695
+  {
+  range <- seq(from = ltml[group.id ==  gr, min(ymd(paste(first.join,'01', sep = '')))], to = ltml[group.id ==  gr, max(ymd(paste(last.join,'01', sep = '')))], by = 'month')
+  for (ym in seq_along(range))  # ym<-7
+    {
+    ymc <- substr(as.character(range[ym], '%Y%m'),1,6)
+    nnm <- ltml[group.id ==  gr & joined ==  ymc, nr.of.new.members]
+    if (length(nnm) ==  0) {nnm <- 0}
+    fj <- unique(ltml[group.id ==  gr, first.join])
+    lj <- unique(ltml[group.id ==  gr, last.join])
+    tempgroup <- rbindlist(list(tempgroup,list(gr, ymc, nnm, fj, lj)), use.names =  FALSE)
+    }
+  }
+ltml <- tempgroup   
+
+live_techgroups_events_list <- as.data.table(import('live_techgroups_events_list.RData'))
+ltel <- live_techgroups_events_list[, .(group.id, event.id, time, yes_rsvp_count)]
+ltel[, ': = ' (group.id = as.integer(group.id), time = format(time, format = '%Y%m'))]
+setnames(ltel, c('yes_rsvp_count', 'time'), c('yes_rsvp.count', 'event.yearmonth'))
+ltel[, ': = ' (first.event.yearmonth = min(event.yearmonth), last.event.yearmonth = max(event.yearmonth)), by = group.id]
+
+live_techgroups_list <- as.data.table(import('live_techgroups_list.RData'))
+ltl <- unique(live_techgroups_list[, .(group.id, created, country, country_name, city, lat, lon)])
+ltl[, created : =  format(created, format = '%Y%m')]
+ltl[, ': = ' (lat = round(mean(lat),2), lon = round(mean(lon),2)), by = .(country, country_name, city)]
+
+setkey(ltl, group.id)
+setkey(ltel, group.id)
+ltyml <- merge(ltl, ltel, all = TRUE) ## full join
+ltyml[, ': = ' (new.event.count = .N, new.yes_rsvp.count = sum(yes_rsvp.count)), by = .(group.id, created, country, city, event.yearmonth)]
+ltyml[, ': = ' (event.id = NULL, yes_rsvp.count = NULL)]
+setkey(ltyml, group.id, country, city, event.yearmonth)
+ltyml <- unique(ltyml)
+
+sample <- data.table(group.id = as.integer(0), created = as.character(''), country = as.character(''), country_name = as.character(''), city = as.character(''), lat = as.numeric(0), lon = as.numeric(0), event.yearmonth = as.character(''), first.event.yearmonth = as.character(''), last.event.yearmonth = as.character(''), new.event.count = as.integer(0), new.yes_rsvp.count = as.integer(0))
+tempgroup <- sample[!1,]
+for (gr in ltyml[, unique(group.id)])  # gr<-44695
+   {
+   range <- seq(from = ltyml[group.id ==  gr, min(ymd(paste(first.event.yearmonth,'01', sep = '')))], to = ltyml[group.id ==  gr, max(ymd(paste(last.event.yearmonth,'01', sep = '')))], by = 'month')
+   for (ym in seq_along(range))  # ym<-7
+      {
+      yme <- substr(as.character(range[ym], '%Y%m'),1,6)
+      ymc <- unique(ltyml[group.id ==  gr, created])
+      co <- unique(ltyml[group.id ==  gr, country])
+      cn <- unique(ltyml[group.id ==  gr, country_name])
+      ci <- unique(ltyml[group.id ==  gr, city])
+      lt <- unique(ltyml[group.id ==  gr, lat])
+      ln <- unique(ltyml[group.id ==  gr, lon])
+      feym <- unique(ltyml[group.id ==  gr, first.event.yearmonth])
+      leym <- unique(ltyml[group.id ==  gr, last.event.yearmonth])
+      nec <- ltyml[group.id ==  gr & event.yearmonth ==  yme, new.event.count]
+      if (length(nec) ==  0) {nec <- 0}
+      nrc <- ltyml[group.id ==  gr & event.yearmonth ==  yme, new.yes_rsvp.count]
+      if (length(nrc) ==  0) {nrc <- 0}
+      tempgroup <- rbindlist(list(tempgroup,list(gr, ymc, co, cn, ci, lt, ln, yme, feym, leym, nec, nrc)), use.names =  FALSE)
+      }
+   }
+ltyml <- tempgroup # 70229
+setnames(ltyml, 'event.yearmonth', 'yearmonth')
+setnames(ltml, 'joined', 'yearmonth')
+
+setkey(ltyml, group.id, yearmonth)
+setkey(ltml, group.id, yearmonth)
+ltyml <- merge(ltyml, ltml, all = TRUE) ## full join
+# ltyml <- ltyml[ltml]
+ltyml[is.na(new.event.count) ==   TRUE, new.event.count : =  0]
+ltyml[is.na(new.yes_rsvp.count) ==   TRUE, new.yes_rsvp.count : =  0]
+ltyml[is.na(nr.of.new.members) ==   TRUE, nr.of.new.members : =  0]
+ltyml <- ltyml[order(group.id, yearmonth)]
+ltyml[is.na(city) ==   FALSE, ': = ' (lat = mean(lat), lon = mean(lon)), by = .(country, city)]
+temp <- unique(ltyml[is.na(country_name) ==   FALSE, .(group.id, created, country, country_name, city, lat, lon, first.event.yearmonth, last.event.yearmonth, first.join, last.join)])
+setkey(temp, group.id, first.join, last.join)
+setkey(ltyml, group.id, first.join, last.join)
+ltyml <- temp[ltyml]
+ltyml[, ': = ' (i.created = NULL, i.country = NULL, i.country_name = NULL, i.city = NULL, i.lat = NULL, i.lon = NULL, i.first.event.yearmonth = NULL, i.last.event.yearmonth = NULL)]
+
+live_techgroups_list <- import(live_techgroups_list)
+temp <- unique(live_techgroups_list[, .(group.id, created, country, country_name, city, lat, lon)])
+setkey(temp, group.id)
+setkey(ltyml, group.id)
+live_techgroups_history <- temp[ltyml]
+
+live_techgroups_history[, ': = ' (i.created = NULL, i.country = NULL, i.country_name = NULL, i.city = NULL, i.lat = NULL, i.lon = NULL, imp.join =  FALSE, created = format(created, format = '%Y%m'))]
+live_techgroups_history[is.na(first.join) ==   TRUE, ': = ' (first.join = first.event.yearmonth, last.join = last.event.yearmonth, imp.join = TRUE)]
+live_techgroups_history[, year : =  substr(yearmonth,1,4)]
+setnames(live_techgroups_history, old = c('new.event.count', 'new.yes_rsvp.count'), new = c('nr.of.new.events', 'nr.of.new.yes_rsvp'))
+```
+
+## Let's save the live_techgroups_history file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(live_techgroups_history, 'live_techgroups_history.RData')
+# live_techgroups_history <- as.data.table(import('live_techgroups_history.RData'))
+```
+
+
+## Let's create the live_techgroups_nr_country_city history file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+live_techgroups_nr_country_city_history <- live_techgroups_history
+live_techgroups_nr_country_city_history <- live_techgroups_nr_country_city_history[, .(country, country_name, city, lat, lon, year, yearmonth, nr.of.new.members, nr.of.new.events, nr.of.new.yes_rsvp)]
+live_techgroups_nr_country_city_history[, ': = ' (nr.of.live.groups = .N, 
+                                               nr.of.new.events = sum(nr.of.new.events),
+                                               nr.of.new.yes_rsvp = sum(nr.of.new.yes_rsvp),
+                                               nr.of.new.members = sum(nr.of.new.members)), 
+                                        by = .(country, country_name, city, lat, lon, year, yearmonth)]
+live_techgroups_nr_country_city_history <- unique(live_techgroups_nr_country_city_history[, .(country, country_name, city, lat, lon, year, yearmonth, nr.of.live.groups, nr.of.new.members, nr.of.new.events, nr.of.new.yes_rsvp)])
+live_techgroups_nr_country_city_history <- live_techgroups_nr_country_city_history[order(country_name, city, yearmonth)]
+```  
+
+
+## Let's save the live_techgroups_nr_country_city_history file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(live_techgroups_nr_country_city_history, 'live_techgroups_nr_country_city_history.RData')
+# live_techgroups_nr_country_city_history <- as.data.table(import('live_techgroups_nr_country_city_history.RData'))
+```
+
+
+## Let's create the live_techgroups_nr_country_history file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+live_techgroups_nr_country_history <- live_techgroups_history
+live_techgroups_nr_country_history <- live_techgroups_nr_country_history[, .(country, country_name, year, yearmonth, nr.of.new.members, nr.of.new.events, nr.of.new.yes_rsvp)]
+live_techgroups_nr_country_history[, ': = ' (nr.of.live.groups = .N, 
+                                           nr.of.new.events = sum(nr.of.new.events),
+                                           nr.of.new.yes_rsvp = sum(nr.of.new.yes_rsvp),
+                                           nr.of.new.members = sum(nr.of.new.members)), 
+                                  by = .(country, country_name, year, yearmonth)]
+live_techgroups_nr_country_history <- unique(live_techgroups_nr_country_history[, .(country, country_name, year, yearmonth, nr.of.live.groups, nr.of.new.members, nr.of.new.events, nr.of.new.yes_rsvp)])
+live_techgroups_nr_country_history <- live_techgroups_nr_country_history[order(country_name, yearmonth)]
+```
+
+
+## Let's save the live_techgroups_nr_country_history file
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+export(live_techgroups_nr_country_history, 'live_techgroups_nr_country_history.RData')
+# live_techgroups_nr_country_history <- as.data.table(import('live_techgroups_nr_country_history.RData'))
+```
+
+
+## Let's see some basic statistics on the whole thing
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+temp <- data.table(import('live_techgroups_nr_country_city_history.RData'))
+length(temp[, unique(city)]) # 707
+
+temp <- data.table(import('live_techgroups_nr_country_history.RData'))
+temp[, min(yearmonth)] # 200304
+temp[, max(yearmonth)] # 201607
+length(temp[, unique(country)]) # 42
+temp[, sum(nr.of.new.members)] # 1157992
+temp[, sum(nr.of.new.events)] # 98348
+temp[, sum(nr.of.new.yes_rsvp)] # 2946290
+
+temp <- data.table(import('live_techgroups_list.RData'))
+length(temp[, unique(group.id)]) # 8571
+
+temp <- data.table(import('live_participant_list.RData'))
+temp[, .N]
+temp[is.na(organized.groups) ==   FALSE | is.na(organized.events) ==   FALSE | is.na(coorganized.groups) ==   FALSE | is.na(coorganized.events) ==   FALSE | is.na(assistant.organized.groups) ==   FALSE | is.na(assistant.organized.events) ==   FALSE | is.na(event_organized.events) ==   FALSE, .N]
+length(temp[is.na(organized.groups) ==   FALSE, member.id]) # 6299
+length(temp[is.na(organized.groups) ==   TRUE & is.na(coorganized.groups) ==   FALSE, member.id]) # 8775
+length(temp[is.na(organized.groups) ==   TRUE & is.na(coorganized.groups) ==   TRUE & is.na(assistant.organized.groups) ==   FALSE, member.id]) # 754
+length(temp[is.na(organized.groups) ==   TRUE & is.na(coorganized.groups) ==   TRUE & is.na(assistant.organized.groups) ==   TRUE & is.na(event_organized.events) ==   FALSE, member.id]) # 1419
+temp[, sum(guests.count)] # 172986
+
+temp <- data.table(import('live_participation_list.RData'))
+temp[, .N] # 2631979
+temp <- temp[is.na(member.role) ==   FALSE, .(member.id, member.role, group.id)]
+temp <- unique(temp) # 20538
+length(temp[, unique(member.id)]) # 17247
+length(temp[, unique(group.id)]) # 8213
+length(temp[, unique(member.role)]) # 4
+```
+
+
+# Let's plot the live_techgroups_nr_country_history
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+ecc <- data.table(import('ecc.RData'))
+census <- melt(ecc, id = 1:3, measure.vars = patterns('X'))
+setnames(census, 'value', 'population')
+census[, year : =  substr(year,2,5)]
+census[, ': = ' (country = as.character(country), country_name = as.character(country_name), region = as.character(region))]
+
+temp <- data.table(import('live_techgroups_nr_country_history.RData'))
+temp[, ': = ' (country = as.character(country), country_name = as.character(country_name), nr.of.live.groups = as.numeric(nr.of.live.groups))]
+temp[, ': = ' (nr.of.live.groups = round(mean(nr.of.live.groups),0), nr.of.new.members = sum(nr.of.new.members), nr.of.new.events = sum(nr.of.new.events),  nr.of.new.yes_rsvp = sum(nr.of.new.yes_rsvp)), by = .(country, country_name, year)]
+temp <- unique(temp[, yearmonth : =  NULL])
+
+setkey(temp, year, country, country_name)
+setkey(census, year, country, country_name)
+evolution <- census[temp]
+evolution <- evolution[region ==  'Western Europe', region: = 'WE']
+evolution <- evolution[region ==  'Eastern Europe', region: = 'EE']
+evolution <- evolution[region ==  'Northern Europe', region: = 'NE']
+evolution <- evolution[region ==  'Southern Europe', region: = 'SE']
+evolution[, ': = ' (country = as.factor(country), country_name = as.factor(country_name), region = as.factor(region))]
+evolution2 <- evolution[nr.of.new.events>0, ]
+evolution3 <- evolution[nr.of.new.members>0, ]
+evolution4 <- evolution[nr.of.new.yes_rsvp>0, ]
+
+p1 <- ggplot() + 
+        #ggtitle('Evolution of Tech Groups by Countries') +
+        geom_point(data = evolution, 
+                   aes(x = evolution[, as.numeric(year)], 
+                       y = interaction(evolution[, .(region, country_name)], sep = ' - ', lex.order = TRUE, drop = TRUE),
+                       group = 1,
+                       color = evolution[, country_name],
+                       size = evolution[, nr.of.live.groups]), 
+                   shape = 1,
+                   stroke = 1.5, 
+                   alpha = .7) +
+        geom_segment(aes(x = 2008.5, 
+                         y = .5, 
+                         xend = 2008.5, 
+                         yend = 10.5), 
+                     linetype = 'dashed', 
+                     color = 'red', 
+                     size = .7) +
+        geom_segment(aes(x = 2007.5, 
+                         y = 10.5, 
+                         xend = 2007.5, 
+                         yend = 20.5), 
+                     linetype = 'dashed', 
+                     color = 'red', 
+                     size = .7) +
+        geom_segment(aes(x = 2011.5, 
+                         y = 20.5, 
+                         xend = 2011.5, 
+                         yend = 34.5), 
+                     linetype = 'dashed', 
+                     color = 'red', 
+                     size = .7) +
+        geom_segment(aes(x = 2008.5, 
+                         y = 34.5, 
+                         xend = 2008.5, 
+                         yend = 44), 
+                     linetype = 'dashed', 
+                     color = 'red', 
+                     size = .7) +
+        guides(colour =  FALSE) +
+        scale_size(range = c(.5, 10), 
+                   guide = guide_legend(title = 'tech groups',
+                                        keywidth = 6, 
+                                        keyheight = 25,
+                                        default.unit = 'point'),
+                   breaks = c(100, 500, 1000),
+                   labels = c('100', '500', '1000')) +
+        xlim(2003, 2016) +
+        labs(x = '', y = '')
+
+p1a <- ggdraw(switch_axis_position(p1 + theme(panel.border = element_blank(),
+                                              axis.text.x = element_text(angle = 70, vjust = .5, size = 11),
+                                              axis.text.y = element_text(size = 11),
+                                              legend.text = element_text(colour = 'grey', size = 11),
+                                              legend.title = element_text(colour = 'grey', size = 11, face = 'bold'),
+                                              legend.position = c(.15, .2)), 
+                                    axis = 'y'))
+
+p2 <- ggplot() + 
+        #ggtitle('Yearly Held Events by Countries') +
+        geom_point(data = evolution2, 
+                   aes(x = evolution2[, as.numeric(year)], 
+                       y = interaction(evolution2[, .(region, country_name)], sep = ' - ', lex.order = TRUE, drop = TRUE),
+                       group = 1,
+                       color = evolution2[, country_name],
+                       size = evolution2[, nr.of.new.events]), 
+                   shape = 1,
+                   stroke = 1.5, 
+                   alpha = .7) +
+        geom_segment(aes(x = 2008.5, 
+                         y = .5, 
+                         xend = 2008.5, 
+                         yend = 10.5), l
+                     inetype = 'dashed', 
+                     color = 'red', 
+                     size = .7) +
+        geom_segment(aes(x = 2007.5, 
+                         y = 10.5, 
+                         xend = 2007.5, 
+                         yend = 20.5), 
+                     linetype = 'dashed', 
+                     color = 'red', 
+                     size = .7) +
+        geom_segment(aes(x = 2011.5, 
+                         y = 20.5, 
+                         xend = 2011.5, 
+                         yend = 34.5), 
+                     linetype = 'dashed', 
+                     color = 'red', 
+                     size = .7) +
+        geom_segment(aes(x = 2008.5, 
+                         y = 34.5, 
+                         xend = 2008.5, 
+                         yend = 44), 
+                     linetype = 'dashed', 
+                     color = 'red', 
+                     size = .7) +
+        guides(colour =  FALSE) +
+        scale_size(range = c(.5, 10), 
+                   guide = guide_legend(title = 'tech events',
+                                        keywidth = 6, 
+                                        keyheight = 25,
+                                        default.unit = 'point'),
+                   breaks = c(100, 1000, 2000, 4000),
+                   labels = c('100', '1000', '2000', '4000')) +
+        xlim(2003, 2016) +
+        labs(x = '', y = '')
+p2a <- ggdraw(switch_axis_position(p2 + theme(panel.border = element_blank(),
+                                              axis.text.x = element_text(angle = 70, vjust = .5, size = 11),
+                                              axis.text.y = element_text(size = 11),
+                                              legend.text = element_text(colour = 'grey', size = 11),
+                                              legend.title = element_text(colour = 'grey', size = 11, face = 'bold'),
+                                              legend.position = c(.15, .2)), 
+                                   axis = 'y'))
+
+p3 <- ggplot() + 
+        #ggtitle('Yearly Fresh Joined Members (in 1m Population) by Countries') +
+        geom_point(data = evolution3, 
+                   aes(x = evolution3[, as.numeric(year)], 
+                       y = interaction(evolution3[, .(region, country_name)], sep = ' - ', lex.order = TRUE, drop = TRUE),
+                       group = 1,
+                       color = evolution3[, country_name],
+                       size = round(evolution3[, nr.of.new.members]/population*1000000,0)),
+                   shape = 1,
+                   stroke = 1.5, 
+                   alpha = .7) +
+        geom_segment(aes(x = 2008.5, 
+                         y = .5, 
+                         xend = 2008.5, 
+                         yend = 10.5), 
+                     linetype = 'dashed', color = 'red', size = .7) +
+        geom_segment(aes(x = 2007.5, 
+                         y = 10.5, 
+                         xend = 2007.5, 
+                         yend = 20.5), 
+                     linetype = 'dashed', 
+                     color = 'red', 
+                     size = .7) +
+        geom_segment(aes(x = 2011.5, 
+                         y = 20.5, 
+                         xend = 2011.5, 
+                         yend = 34.5), 
+                     linetype = 'dashed', 
+                     color = 'red', 
+                     size = .7) +
+        geom_segment(aes(x = 2008.5, 
+                         y = 34.5, 
+                         xend = 2008.5, 
+                         yend = 44), 
+                     linetype = 'dashed', 
+                     color = 'red', 
+                     size = .7) +
+        guides(colour =  FALSE) +
+        scale_size(range = c(.5, 10), 
+                   guide = guide_legend(title = 'fresh members\nin 1m population',
+                                        keywidth = 6, 
+                                        keyheight = 25, 
+                                        default.unit = 'point'),
+                   breaks = c(100, 1000, 2000, 4000),
+                   labels = c('100', '1000', '2000', '4000')) +
+        xlim(2003, 2016) +
+        labs(x = '', y = '')
+p3a <- ggdraw(switch_axis_position(p3 + theme(panel.border = element_blank(),
+                                              axis.text.x = element_text(angle = 70, vjust = .5, size = 11),
+                                              axis.text.y = element_text(size = 11),
+                                              legend.text = element_text(colour = 'grey', size = 11),
+                                              legend.title = element_text(colour = 'grey', size = 11, face = 'bold'),
+                                              legend.position = c(.15, .2)),
+                                   axis = 'y'))
+
+p4 <- ggplot() +
+        #ggtitle('Yearly Participations (in 1m Population) by Countries') +
+        geom_point(data = evolution4, 
+                   aes(x = evolution4[, as.numeric(year)], 
+                       y = interaction(evolution4[, .(region, country_name)], sep = ' - ', lex.order = TRUE, drop = TRUE),
+                       group = 1,
+                       color = evolution4[, country_name],
+                       size = round(evolution4[, nr.of.new.yes_rsvp]*1000000/population,0)), 
+                   shape = 1,
+                   stroke = 1.5, 
+                   alpha = .7) +
+        geom_segment(aes(x = 2008.5, 
+                         y = .5, 
+                         xend = 2008.5, 
+                         yend = 10.5), 
+                     linetype = 'dashed', 
+                     color = 'red', 
+                     size = .7) +
+        geom_segment(aes(x = 2007.5, 
+                         y = 10.5, 
+                         xend = 2007.5, 
+                         yend = 20.5), 
+                     linetype = 'dashed', 
+                     color = 'red', 
+                     size = .7) +
+        geom_segment(aes(x = 2011.5, 
+                         y = 20.5, 
+                         xend = 2011.5, 
+                         yend = 34.5), 
+                     linetype = 'dashed', 
+                     color = 'red', 
+                     size = .7) +
+        geom_segment(aes(x = 2008.5, 
+                         y = 34.5, 
+                         xend = 2008.5, 
+                         yend = 44), 
+                     linetype = 'dashed', 
+                     color = 'red', 
+                     size = .7) +
+        guides(colour =  FALSE) +
+        scale_size(range = c(.5, 10), 
+                   guide = guide_legend(title = 'yes_rsvp\nin 1m population',
+                                      keywidth = 6, 
+                                      keyheight = 25, 
+                                      default.unit = 'point'),
+                   breaks = c(100, 1000, 2000, 4000),
+                   labels = c('100', '1000', '2000', '4000')) +
+        xlim(2003, 2016) +
+        labs(x = '', y = '')
+p4a <- ggdraw(switch_axis_position(p4 + theme(panel.border = element_blank(),
+                                              axis.text.x = element_text(angle = 70, vjust = .5, size = 11),
+                                              axis.text.y = element_text(size = 11),
+                                              legend.text = element_text(colour = 'grey', size = 11),
+                                              legend.title = element_text(colour = 'grey', size = 11, face = 'bold'),
+                                              legend.position = c(.15, .2)), 
+                                  axis = 'y'))
+
+p1a
+p2a
+p3a
+p4a
+```
+
+
+# Let's plot the live techgroups history on map
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+Europe_gmap <- get_map(location = 'Europe', zoom = 4, source = 'stamen', maptype = 'toner-lite', messaging = TRUE, color = 'color', language = 'en-EN')
+setkey(live_techgroups_nr_country_city_history, year, country)
+setkey(census, year, country)
+evolution5 <- copy(census[live_techgroups_nr_country_city_history])
+evolution5 <- evolution5[order(yearmonth, country, city)]
+min_ym <- evolution5[(nr.of.new.events>0 | nr.of.new.yes_rsvp>0), min(yearmonth)]
+evolution5 <- evolution5[yearmonth> = min_ym, .(region, country, country_name, city, lat, lon, nr.of.new.events, nr.of.new.yes_rsvp, yearmonth, population)]
+evolution5[, ': = ' (nr.of.new.events = as.integer(nr.of.new.events),
+                  nr.of.new.yes_rsvp = as.integer(nr.of.new.yes_rsvp),
+                  country_name = as.factor(country_name))]
+evolution5[, ': = ' (lat = round(mean(lat),2),
+                  lon = round(mean(lon),2),
+                  nr.of.new.events = sum(nr.of.new.events),
+                  norm.nr.of.new.yes_rsvp = round(sum(nr.of.new.yes_rsvp)*1000000/population,0),
+                  nr.of.new.yes_rsvp = sum(nr.of.new.yes_rsvp)), by = .(country, city, yearmonth)]
+evolution5 <- unique(evolution5)
+setkey(live_techgroups_nr_country_city_history, year, country)
+setkey(census, year, country)
+evolution6 <- copy(census[live_techgroups_nr_country_city_history])
+evolution6 <- evolution6[order(yearmonth, country, city)]
+min_ym <- evolution6[nr.of.new.members>0, min(yearmonth)]
+evolution6 <- evolution6[yearmonth> = min_ym, .(region, country, country_name, city, lat, lon, nr.of.new.members, yearmonth, population)]
+evolution6[, ': = ' (nr.of.new.members = as.integer(nr.of.new.members),
+                  country_name = as.factor(country_name))]
+evolution6[, ': = ' (lat = round(mean(lat),2),
+                  lon = round(mean(lon),2),
+                  norm.nr.of.new.members = round(sum(nr.of.new.members)*1000000/population,0),
+                  nr.of.new.members = sum(nr.of.new.members)), by = .(country, city, yearmonth)]
+evolution6 <- unique(evolution6)
+
+setkey(live_techgroups_nr_country_city_history, year, country)
+setkey(census, year, country)
+evolution7 <- copy(census[live_techgroups_nr_country_city_history])
+evolution7 <- evolution7[order(yearmonth, country, city)]
+min_ym <- evolution7[nr.of.live.groups>0, min(yearmonth)]
+evolution7 <- copy(evolution7[yearmonth> = min_ym, .(region, country, country_name, city, lat, lon, nr.of.live.groups, yearmonth)])
+evolution7[, ': = ' (nr.of.live.groups = as.integer(nr.of.live.groups),
+                  country_name = as.factor(country_name))]
+evolution7[, ': = ' (nr.of.live.groups = sum(nr.of.live.groups),
+                  lat = round(mean(lat),2),
+                  lon = round(mean(lon),2)), by = .(country, city, yearmonth)]
+evolution7 <- unique(evolution7)
+
+yml <- copy(evolution5[, unique(as.numeric(yearmonth))])
+dev.off()
+setwd('./CEU_final_project/pictures/city_and_nr_of_tech_events_gmap')
+for (i in 1:length(yml)) # i<-100
+  {
+  set.seed(123)
+  cities <- as.data.frame(evolution5[yearmonth ==  yml[i], ])
+  mapPoints <- ggmap(Europe_gmap) +
+                 ggtitle(paste('Location and number of tech meetup events in',  paste(substr(as.character(yml[i]), 1, 4), substr(as.character(yml[i]), 5, 6), sep = '.'), sep = ' ')) +
+                 geom_point(data = cities,
+                            aes(x = cities$lon,
+                                y = cities$lat,
+                                color = cities$country_name,
+                                size = cities$nr.of.new.events),
+                            alpha = .7,
+                            stroke = 1.2,
+                            shape = 1) +
+                 scale_colour_discrete(drop = TRUE,
+                                       limits = levels(cities$country_name)) +
+                 guides(colour =  FALSE) +
+                 scale_size(range = c(.5, 10),
+                            guide = guide_legend(title = 'nr of live events',
+                                               keywidth = 6,
+                                               keyheight = 25,
+                                               default.unit = 'point'),
+                            limits = c(0, 600),
+                            breaks = c(10, 100, 500),
+                            labels = c('10', '100', '500'))
+  file_name = paste('city_and_nr_of_tech_events_gmap_', as.character(yml[i]), '.png', sep = '')
+  png(file_name, width = 250, height = 210, units = 'mm', type = 'cairo', bg = 'white', res = 500, pointsize = 1)
+  print(mapPoints)
+  dev.off()
+  print(paste(i, yml[i], sep = ' - '))
+  }
+setwd('./CEU_final_project')
+
+yml <- copy(evolution5[, unique(as.numeric(yearmonth))])
+dev.off()
+setwd('./CEU_final_project/pictures/city_and_nr_of_tech_events_yes_rsvp_gmap')
+for (i in 1:length(yml)) # i<-100
+  {
+  set.seed(123)
+  cities <- as.data.frame(evolution5[yearmonth ==  yml[i], ])
+  mapPoints <- ggmap(Europe_gmap) +
+                 ggtitle(paste('Location and number of tech meetup events yes_rsvp in',  paste(substr(as.character(yml[i]), 1, 4), substr(as.character(yml[i]), 5, 6), sep = '.'), sep = ' ')) +
+                 geom_point(data = cities,
+                            aes(x = cities$lon,
+                                y = cities$lat,
+                                color = cities$country_name,
+                                size = cities$norm.nr.of.new.yes_rsvp), # normalized
+                            alpha = .7,
+                            stroke = 1.2,
+                            shape = 1) +
+                 scale_colour_discrete(drop = TRUE,
+                                       limits = levels(cities$country_name)) +
+                 guides(colour =  FALSE) +
+                 scale_size(range = c(.5, 10),
+                            guide = guide_legend(title = 'nr of new yes_rsvp in 1m population',
+                                               keywidth = 6,
+                                               keyheight = 25,
+                                               default.unit = 'point'),
+                            limits = c(0, 1400),
+                            breaks = c(1, 10, 100, 500),
+                            labels = c('1', '10', '100', '500'))
+  file_name = paste('city_and_nr_of_tech_events_yes_rsvp_gmap_', as.character(yml[i]), '.png', sep = '')
+  png(file_name, width = 250, height = 210, units = 'mm', type = 'cairo', bg = 'white', res = 500, pointsize = 1)
+  print(mapPoints)
+  dev.off()
+  print(paste(i, yml[i], sep = ' - '))
+  }
+setwd('./CEU_final_project')
+
+yml <- copy(evolution6[, unique(as.numeric(yearmonth))])
+dev.off()
+setwd('./CEU_final_project/pictures/city_and_nr_of_tech_group_members_gmap')
+for (i in 1:length(yml)) # i<-100
+  {
+  set.seed(123)
+  cities <- as.data.frame(evolution6[yearmonth ==  yml[i], ])
+  mapPoints <- ggmap(Europe_gmap) +
+                 ggtitle(paste('Location and number of tech meetup new joiners in', paste(substr(as.character(yml[i]), 1, 4), substr(as.character(yml[i]), 5, 6), sep = '.'), sep = ' ')) +
+                 geom_point(data = cities,
+                            aes(x = cities$lon,
+                                y = cities$lat,
+                                color = cities$country_name,
+                                size = cities$norm.nr.of.new.members), # normalized
+                            alpha = .7,
+                            stroke = 1.2,
+                            shape = 1) +
+                 scale_colour_discrete(drop = TRUE,
+                                       limits = levels(cities$country_name)) +
+                 guides(colour =  FALSE) +
+                 scale_size(range = c(.5, 10),
+                            guide = guide_legend(title = 'nr of new members in 1m population',
+                                               keywidth = 6,
+                                               keyheight = 25,
+                                               default.unit = 'point'),
+                            limits = c(0, 2800),
+                            breaks = c(1, 10, 100, 500),
+                            labels = c('1', '10', '100', '500'))
+  file_name = paste('city_and_nr_of_tech_group_members_gmap_', as.character(yml[i]), '.png', sep = '')
+  png(file_name, width = 250, height = 210, units = 'mm', type = 'cairo', bg = 'white', res = 500, pointsize = 1)
+  print(mapPoints)
+  dev.off()
+  print(paste(i, yml[i], sep = ' - '))
+  }
+setwd('./CEU_final_project')
+
+# 4
+yml <- copy(evolution7[, unique(as.numeric(yearmonth))])
+dev.off()
+setwd('./CEU_final_project/pictures/city_and_nr_of_tech_groups_gmap')
+for (i in 1:length(yml)) # i<-100
+  {
+  set.seed(123)
+  cities <- as.data.frame(evolution7[yearmonth ==  yml[i], ])
+  mapPoints <- ggmap(Europe_gmap) +
+                 ggtitle(paste('Location and number of tech groups in', paste(substr(as.character(yml[i]), 1, 4), substr(as.character(yml[i]), 5, 6), sep = '.'), sep = ' ')) +
+                 geom_point(data = cities,
+                            aes(x = cities$lon,
+                                y = cities$lat,
+                                color = cities$country_name,
+                                size = cities$nr.of.live.groups),
+                            alpha = .7,
+                            stroke = 1.2,
+                            shape = 1) +
+                 scale_colour_discrete(drop = TRUE,
+                                       limits = levels(cities$country_name)) +
+                 guides(colour = FALSE) +
+                 scale_size(range  = c(.5, 10),
+                            guide = guide_legend(title = 'nr of tech groups',
+                                                 keywidth = 6,
+                                                 keyheight = 25,
+                                                 default.unit = 'point'),
+                            limits = c(0, 900),
+                            breaks = c(1, 10, 100, 500),
+                            labels = c('1', '10', '100', '500'))
+  file_name = paste('city_and_nr_of_tech_groups_gmap_', as.character(yml[i]), '.png', sep = '')
+  png(file_name, width = 250, height = 210, units = 'mm', type = 'cairo', bg = 'white', res = 500, pointsize = 1)
+  print(mapPoints)
+  dev.off()
+  print(paste(i, yml[i], sep = ' - '))
+  }
+setwd('./CEU_final_project')
+```
+
+
+#####################################################################
+## topic section (chunk!)
+#####################################################################
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+## Let's create topic network
+source_city <- live_techgroups_topics[, .(topic.id, topic.name, topic.urlkey, group.id, group.name)]
+source_city[, ': = ' (topic.urlkey = tolower(topic.urlkey), topic.name = stri_trans_totitle(topic.name))]
+setnames(source_city, 'topic.id', 'SOURCE')
+target_topic <- copy(source_city)
+setnames(target_topic, 'SOURCE', 'TARGET')
+live_topic_edges <- merge(source_city, target_topic, by = c('group.id', 'group.name'), allow.cartesian = TRUE)
+live_topic_edges <- live_topic_edges[SOURCE<TARGET, ]
+setkey(live_topic_edges, group.id)
+
+techgroups <- data.table(import('live_techgroups_list.RData'))
+techgroups <- techgroups[, .(group.id, yes.rsvp.count)]
+setkey(techgroups, group.id)
+
+live_topic_edges <- techgroups[live_topic_edges]
+live_topic_edges[, sum.yes.rsvp.count : =  sum(yes.rsvp.count), by = .(SOURCE, TARGET)]
+live_topic_edges <- live_topic_edges[, .(SOURCE, TARGET, topic.name.x, topic.urlkey.x, topic.name.y, topic.urlkey.y, sum.yes.rsvp.count)]
+# live_topic_edges[, WEIGHT : =  sum(yes.rsvp.count), by = .(SOURCE, TARGET)]
+# live_topic_edges <- unique(live_topic_edges)
+# live_topic_edges <- live_topic_edges[order(-WEIGHT)]
+
+## Let's save the live_topic_edges file
+export(live_topic_edges, 'live_topic_edges.RData')
+# live_topic_edges <- as.data.table(import('live_topic_edges.RData'))
+
+## Let's create a unique live topic list 
+live_topic_nodes <- live_techgroups_topics[, .(topic.id, topic.name, topic.urlkey)]
+live_topic_nodes[, ': = ' (topic.urlkey = tolower(topic.urlkey), topic.name = stri_trans_totitle(topic.name))]
+live_topic_nodes <- unique(live_topic_nodes)
+setkey(live_topic_nodes, topic.id)
+
+## Let's save the unique_live_topic_list file
+export(live_topic_nodes, 'live_topic_nodes.RData')
+## live_topic_nodes <- as.data.table(import('live_topic_nodes.RData'))
+
+## Let's define communities (leading.eigenvector.community)
+# live_topic_nodes <- live_topic_nodes[topic.id ==  1508168, ]
+# G <- graph_from_data_frame(d = live_topic_edges, vertices = live_topic_nodes, directed  = F)
+tedges <- live_topic_edges[, nr.of.groups : =  .N, by = .(SOURCE, TARGET)]
+# tedges <- live_topic_edges[, WEIGHT : =  ceiling(sum.yes.rsvp.count/100)]
+# tedges <- live_topic_edges[, WEIGHT : =  nr.of.groups)]
+# tedges <- ttedges[, .(SOURCE, TARGET, WEIGHT)]
+tedges <-tedges[, .(SOURCE, TARGET)]
+
+G <- graph.data.frame(tedges, directed = FALSE, vertices = NULL)
+
+community <- cluster_optimal(G)
+
+
+lec <- leading.eigenvector.community(G)
+lec$modularity
+lec$membership
+# E(G)            # The edges of the G object
+# V(G)            # The nodes of the G object
+# E(G)$WEIGHT     # Edge attribute G
+# V(G)$topic_name # Node attribute topic
+## leading.eigenvector.community
+
+# str(lec)
+# lec$merges
+# merges(lec)
+# lec$membership
+# membership(lec)
+# lec$options
+# print(options(lec))
+# lec$modularity
+# modularity(lec)
+# length(lec)
+# str(lec[1])
+# str(lec[2])
+# str(lec[3])
+# str(lec[4])
+# plot(lec, G)
+
+```
+#####################################################################
+## end of topic part (chunk!!)
+#####################################################################
+
+
+
+
+##################################################################
+require(OpenStreetMap)
+require(rgdal)
+map <- openmap(upperLeft = c(68,-23), zoom = 4, lowerRight = c(37,45), type = 'osm-transport')
+plot(map)  
+##################################################################
+
+##################################################################
+require(rworldmap)
+newmap <- getMap(resolution  = "coarse" )
+europe.limits <- geocode(c("CapeFligely,RudolfIsland,Franz Josef Land,Russia", "Gavdos,Greece", "Faja Grande,Azores", "SevernyIsland,Novaya Zemlya,Russia"))
+plot(newmap, xlim = range(europe.limits$lon), ylim = range(europe.limits$lat), asp = 1)
+##################################################################
+
+##################################################################
+https://pakillo.github.io/R-GIS-tutorial/
+##################################################################
+
+##################################################################
+network on map
+http://stackoverflow.com/questions/33122456/r-creating-a-world-network-map
+http://skyeome.net/wordpress/?p = 866
+##################################################################
+
+
+
+```{r, eval=FALSE, cache=TRUE,warning=FALSE,echo=TRUE}
+members_list <- as.data.table(import('live_techgroups_members_list.RData'))
+ec <- as.data.table(import('ecc.RData'))
+ec <- ec[, .(country, country_name, region)]
+members_list[, country : =  toupper(country)]
+members_list[, ': = ' (lat = mean(lat), lon = mean(lon)), by = .(country, city)]
+members_list[city ==  'Arona', city : =  paste(city, ' (', country, ')', sep = '')]
+setkey(ec, country)
+setkey(members_list, country)
+members_list <- ec[members_list]
+missing_cona <- members_list[is.na(country) ==   TRUE, .(country, city, lat, lon)]
+missing_cona <- unique(missing_cona)
+all_cona <- unique(members_list[, .(region, country, country_name, city, lat, lon)])
+setkey(all_cona, city)
+setkey(missing_cona, city)
+temp <- all_cona[missing_cona]
+members_list[city ==  'Antwerpen', ': = ' (country = 'BE', country_name = 'Belgium', region = 'Western Europe')]
+members_list[city ==  'Barcelona', ': = ' (country = 'ES', country_name = 'Spain', region = 'Southern Europe')]
+members_list[city ==  'Salzburg', ': = ' (country = 'AT', country_name = 'Austria', region = 'Western Europe')]
+members_list[city ==  'Sao Paulo', ': = ' (country = 'BR', country_name = 'Brazil', region = 'Southern America')]
+members_list[city ==  'Ulm', ': = ' (country = 'DE', country_name = 'Germany', region = 'Western Europe')]
+members_list[city ==  'Zagreb', ': = ' (country = 'HR', country_name = 'Croatia', region = 'Southern Europe')]
+members_list <- members_list[is.na(city)! = TRUE, ]
+members_list[is.na(country_name) ==   TRUE, unique(country)]
+members_list[, ': = ' (lat = mean(lat), lon = mean(lon)), by = .(country, city)]
+export(members_list, 'live_techgroups_members_list.RData')
+
+participation_list <- as.data.table(import('live_participation_list.RData'))
+participation_list <- participation_list[response ==  'yes', .(group.id, group.name, event.id, event.name, event.time, member.id, member.name, member.role)]
+temp <- copy(participation_list[, group.id])
+temp <- as.data.table(unique(temp))
+temp[, flag : =  1]
+setnames(temp, 'V1', 'group.id')
+setkey(temp, group.id)
+
+techgroups_list <- as.data.table(import('techgroups_list.RData'))
+temp2 <- copy(techgroups_list[, .(id, country, country_name, city, lat, lon)])
+temp2[city ==  'Arona', city : =  paste(city, ' (', country, ')', sep = '')]
+setnames(temp2, 'id', 'group.id')
+setkey(temp2, group.id)
+temp <- temp2[temp]
+temp <- temp[, .(group.id, country, country_name, city, lat, lon)]
+temp[, ': = ' (lat = round(mean(lat),2), lon = round(mean(lon),2)), by = .(country, city)]
+temp <- unique(temp)
+setkey(temp, group.id)
+setkey(participation_list, group.id)
+participation_list <- temp[participation_list]
+temp <- copy(participation_list)
+### temp <- temp[, .N, keyby = list(member.id, city)][, .N, by = member.id]
+temp <- temp[, .N, keyby = list(member.id, country)][, .N, by = member.id]
+participation_list[, ': = ' (lat = round(mean(lat),2), lon = round(mean(lon),2)), by = .(country, city)]
+setkey(temp, N)
+temp <- temp[N>1, ]
+setkey(temp, member.id)
+setkey(participation_list, member.id)
+temp <- copy(participation_list[temp])
+participation_list <- NULL
+temp <- temp[, .(member.id, member.name, event.time, country, country_name, city, lat, lon)]
+#temp[, venue.city : =  stri_trans_totitle(venue.city)]  # , 'Latin-ASCII'
+setkey(temp, country, city)
+temp[, ': = ' (lat = round(mean(lat),2), lon = round(mean(lon),2)), by = .(country, city)]
+### source_city <- copy(temp[, .(country, country_name, city, lat, lon, event.time, member.id)])
+source_country_city <- copy(temp[, .(country, country_name, city, lat, lon, event.time, member.id)])
+### setnames(source_city, 'city', 'SOURCE')
+setnames(source_country_city, 'city', 'SOURCE')
+### target_city <- copy(source_city)
+target_country_city <- copy(source_country_city)
+### setnames(target_city, 'SOURCE', 'TARGET')
+setnames(target_country_city, 'SOURCE', 'TARGET')
+### participant_roaming_edges <- merge(source_city, target_city, by = 'member.id', allow.cartesian = TRUE)
+participant_roaming_edges <- merge(source_country_city, target_country_city, by = 'member.id', allow.cartesian = TRUE)
+export(participant_roaming_edges, 'participant_roaming_edges.RData')
+### participant_roaming_edges2 <- copy(participant_roaming_edges[SOURCE! = TARGET, ])
+participant_roaming_edges2 <- copy(participant_roaming_edges[SOURCE! = TARGET & country.x! = country.y, ])
+participant_roaming_edges <- NULL
+setkey(participant_roaming_edges2, member.id, event.time.x, event.time.y, SOURCE, TARGET)
+participant_roaming_edges3 <- copy(participant_roaming_edges2[event.time.x<event.time.y, ])
+export(participant_roaming_edges2, 'participant_roaming_edges2.RData')
+participant_roaming_edges2 <- NULL
+setkey(participant_roaming_edges3, member.id, event.time.x, event.time.y, SOURCE, TARGET)
+participant_roaming_edges3[, start.yearmonth : =  as.numeric(format(min(event.time.x),"%Y%m")), by = .(country.x, SOURCE) ]
+participant_roaming_edges3[, cursor.yearmonth : =  as.numeric(format(event.time.y,"%Y%m"))]
+participant_roaming_edges4 <- copy(participant_roaming_edges3)
+export(participant_roaming_edges4, 'participant_roaming_edges4.RData')
+participant_roaming_edges4 <- NULL
+participant_roaming_edges3[, ': = ' (member.id = NULL, event.time.x = NULL, event.time.y = NULL)]
+participant_roaming_edges3[, WEIGHT : =  .N, by = .(country.x, country.y, SOURCE, TARGET)]
+participant_roaming_edges3[ ,': = ' (start.yearmonth = NULL, cursor.yearmonth = NULL)]
+participant_roaming_edges3 <- unique(participant_roaming_edges3)
+export(participant_roaming_edges3, 'participant_roaming_edges3.RData')
+# participant_roaming_edges3 <- import('participant_roaming_edges3.RData')
+
+participant_roaming_edges3[, median(WEIGHT)]
+participant_roaming_edges3[, mean(WEIGHT)]
+t_edges <- as.data.table(copy(participant_roaming_edges3[WEIGHT> = 1000, .(SOURCE, TARGET, WEIGHT)]))
+t_edges[, WEIGHT : =  WEIGHT/10000] # round(log(WEIGHT),1)
+t_edges <- t_edges[WEIGHT>0, ]
+setkey(t_edges, WEIGHT)
+
+data <- t_edges[with(t_edges,order(-WEIGHT)),]
+data <- data[1:20,]
+data[, WEIGHT : =  round(WEIGHT*1000,0)]
+data
+
+t_edges[head(WEIGHT) ==  10, ]
+t_edges <- as.data.frame(t_edges)
+rawedges <- network(t_edges,
+                  matrix.type = 'edgelist',
+                  directed = TRUE,  # this will be an undirected network
+                  ignore.eval=FALSE,  # confusingly, this tells it to include edge weights
+                  names.eval = 'WEIGHT')  # names for the edge weights
+save(rawedges, file = 'rawedges.RData')
+names(rawedges)
+
+temp_s <- as.data.frame(copy(unique(participant_roaming_edges3[, .(SOURCE, lat.x, lon.x)])))
+temp_t <- as.data.frame(copy(unique(participant_roaming_edges3[, .(TARGET, lat.y, lon.y)])))
+rawnodes <- rbindlist(list(temp_s, temp_t), use.names = FALSE)
+rawnodes <- unique(rawnodes)
+names(rawnodes)
+rawnodes <- unique(rawnodes) # 671
+setnames(rawnodes, c('SOURCE', 'lat.x', 'lon.x'), c('ID', 'lat', 'lon'))
+names(rawnodes)
+
+# attach the appropriate lat and long coordinates
+# need to subset to the vertices actually in the network
+rawedges%v%'lon'<-sapply(network.vertex.names(rawedges), function(name){rawnodes[rawnodes$ID ==  name,]$lon})
+rawedges%v%'lat'<-sapply(network.vertex.names(rawedges), function(name){rawnodes[rawnodes$ID ==  name,]$lat})
+
+col <- ggnet2(rawedges)$data$label
+
+# ggmap(Europe_gmap) +  
+ggnet2(rawedges,
+       label = TRUE, 
+       label.size = 4,
+       edge.size = 'WEIGHT',
+       edge.color = 'coral',
+       size = 'degree', 
+       mode = c('lon', 'lat')) +
+  guides(color = FALSE, size = FALSE)
+
+
+ggnet2(rawedges)$data
+
+
+
+```

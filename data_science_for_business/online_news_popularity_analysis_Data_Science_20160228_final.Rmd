@@ -1,0 +1,451 @@
+---
+title: "Analysis of an Online News Popularity dataset"
+author: "Sandor Budai"
+date: "21st January 2016"
+output: pdf_document
+data source: http://archive.ics.uci.edu/ml/datasets/Online+News+Popularity
+---
+
+### Precedings
+
+```{r,  echo=FALSE}
+library(dplyr)
+library(data.table)
+library(ggplot2)
+library(reshape2)
+#library(ff)
+Sys.getlocale()
+Sys.setlocale("LC_TIME", "C")
+```
+
+
+### Import
+```{r}
+temp <- tempfile()
+download.file('http://archive.ics.uci.edu/ml/machine-learning-databases/00332/OnlineNewsPopularity.zip', temp)
+rawdt  <- data.table(read.table(unzip(zipfile = temp, files = 'OnlineNewsPopularity/OnlineNewsPopularity.csv', junkpaths = TRUE), header = TRUE, sep = ',', stringsAsFactors = FALSE)) ## further settings are here: https://stat.ethz.ch/R-manual/R-devel/library/utils/html/read.table.html
+metadt  <- read.table(unzip(zipfile = temp, files = 'OnlineNewsPopularity/OnlineNewsPopularity.names'), header = FALSE, sep = '\t')
+unlink(temp)    
+```
+
+
+### Looking for oddity in data
+```{r}
+colSums(is.na(rawdt)) 
+# There are no NAs.
+
+colSums(rawdt == 0)
+
+colSums(rawdt < 0)
+
+```
+
+
+### all histogram
+```{r}
+summary(rawdt)
+for (i in names(rawdt))
+    {
+    vh <- rawdt[, .N, by = i]
+    print(ggplot(data = vh, aes(x = vh[[2]], na.rm = TRUE)) + 
+            geom_histogram(col = 'black', fill = 'white', bins = 15) + 
+            xlab(i) +
+            ggtitle('Histogram'))
+    }
+``` 
+
+
+### Transform - I - computing daily freq
+```{r, echo = FALSE}
+rawdt[, date := as.Date(substring(url, 21, 30))]
+for (i in c(min(rawdt[, date]):max(rawdt[, date]))) 
+    {temp <- rawdt[date == i, .N, by = date]    
+    rawdt[date == i, d_freq := temp[, 2, with = FALSE]]}
+```
+
+### Transform - II - classificating shares into 2 groups
+```{r}
+rawdt[shares >= 1400, upper_shares_class := 1]
+rawdt[shares < 1400, upper_shares_class := 0]
+```
+
+
+
+
+
+
+### deleting not necessary columns
+```{r}
+RemColInd <- c(1, 37, 38)
+dta1 <- rawdt[, -RemColInd, with = FALSE]
+```
+
+
+
+### imputations in place of zeros where obviously should not be zeros
+```{r}
+imp_num_hrefs <- round(as.numeric(dta1 %>% 
+                                    filter(n_tokens_content != 0) %>%
+                                    select(num_hrefs) %>%
+                                    summarise(mean(num_hrefs))))
+dta1[['num_hrefs_imp']] <- 0
+for (i in 1:nrow(dta1)) 
+  {
+  if (dta1$n_tokens_content[i]== 0 & dta1$num_hrefs[i] == 0) 
+    { 
+      dta1$num_hrefs[i]<- imp_num_hrefs
+      dta1$num_hrefs_imp[i] <- 1
+    }
+  }
+
+
+
+imp_num_self_hrefs <- round(as.numeric(dta1 %>%
+                                        select(num_self_hrefs)%>%
+                                        filter(n_tokens_content!= 0)%>%
+                                        summarise(mean(num_self_hrefs))))
+dta1[['num_self_hrefs_imp']] <- 0
+for (i in 1:nrow(dta1)) 
+  {
+  if (dta1$n_tokens_content[i]== 0 & dta1$num_self_hrefs[i] == 0) 
+    { 
+      dta1$num_self_hrefs[i]<- imp_num_self_hrefs
+      dta1$num_self_hrefs_imp[i] <- 1
+    }
+  }
+
+
+
+imp_n_tokens_content <- round(as.numeric(dta1 %>%
+                                        select(n_tokens_content)%>%
+                                        filter(n_tokens_content!= 0)%>%
+                                        summarise(mean(n_tokens_content))))
+dta1[['n_tokens_content_imp']] <- 0
+for (i in 1:nrow(dta1)) 
+  {
+  if (dta1$n_tokens_content[i]== 0) 
+    { 
+      dta1$n_tokens_content[i]<- imp_n_tokens_content
+      dta1$n_tokens_content_imp[i] <- 1
+    }
+  }
+
+
+
+
+  imp_n_unique_tokens <- as.numeric(dta1 %>%
+                                    select(n_unique_tokens)%>%
+                                    filter(n_unique_tokens!= 0)%>%
+                                    summarise(mean(n_unique_tokens)))
+  dta1[['n_unique_tokens_imp']] <- 0
+  for (i in 1:nrow(dta1)) 
+    {
+    if (dta1$n_unique_tokens[i]== 0) 
+      { 
+        dta1$n_unique_tokens[i]<- imp_n_unique_tokens
+        dta1$n_unique_tokens_imp[i] <- 1
+      }
+    }
+
+
+
+
+imp_n_non_stop_words <- as.numeric(dta1 %>%
+                                  select(n_non_stop_words)%>%
+                                  filter(n_non_stop_words!= 0 | n_non_stop_words<=1)%>%
+                                  summarise(mean(n_non_stop_words)))
+
+dta1$n_non_stop_words[31038] <-imp_n_non_stop_words  ### manuality
+dta1[['n_non_stop_words_imp']] <- 0
+dta1$n_non_stop_words_imp[31038] <- 1 ### manuality
+for (i in 1:nrow(dta1)) 
+  {
+  if (dta1$n_non_stop_words[i]== 0) 
+    { 
+      dta1$n_non_stop_words[i]<- imp_n_non_stop_words
+      dta1$n_non_stop_words_imp[i] <- 1
+    }
+  }
+
+
+
+imp_n_non_stop_unique_tokens <- as.numeric(dta1 %>%
+                                  select(n_non_stop_unique_tokens)%>%
+                                  filter(n_non_stop_unique_tokens!= 0)%>%
+                                  summarise(mean(n_non_stop_unique_tokens)))
+dta1[['n_non_stop_unique_tokens_imp']] <- 0    
+for (i in 1:nrow(dta1)) 
+  {    
+  if (dta1$n_non_stop_unique_tokens[i]== 0) 
+    { 
+      dta1$n_non_stop_unique_tokens[i]<- imp_n_non_stop_unique_tokens
+      dta1$n_non_stop_unique_tokens_imp[i] <- 1
+    }
+  }
+
+
+
+imp_kw_max_min <- round(as.numeric(dta1 %>%
+                                        select(kw_max_min)%>%
+                                        filter(kw_max_min!= 1.59)%>%
+                                        summarise(mean(kw_max_min))))
+dta1[['kw_max_min_imp']] <- 0
+for (i in 1:nrow(dta1)) 
+  {
+  if (dta1$kw_max_min[i]== 1.59) 
+    { 
+      dta1$kw_max_min[i]<- imp_kw_max_min
+      dta1$kw_max_min_imp[i] <- 1
+    }
+  }
+
+
+
+imp_self_reference_min_shares <- round(as.numeric(dta1 %>%
+                                        select(self_reference_min_shares)%>%
+                                        filter(self_reference_min_shares!= 1.59)%>%
+                                        summarise(mean(self_reference_min_shares))))
+dta1[['self_reference_min_shares_imp']] <- 0
+for (i in 1:nrow(dta1)) 
+  {
+  if (dta1$self_reference_min_shares[i]== 1.59) 
+    { 
+      dta1$self_reference_min_shares[i]<- imp_self_reference_min_shares
+      dta1$self_reference_min_shares_imp[i] <- 1
+    }
+  }
+
+
+
+imp_self_reference_max_shares <- round(as.numeric(dta1 %>%
+                                        select(self_reference_max_shares)%>%
+                                        filter(self_reference_max_shares!= 1.59)%>%
+                                        summarise(mean(self_reference_max_shares))))
+dta1[['self_reference_max_shares_imp']] <- 0
+for (i in 1:nrow(dta1)) 
+  {
+  if (dta1$self_reference_max_shares[i]== 1.59) 
+    { 
+      dta1$self_reference_max_shares[i]<- imp_self_reference_max_shares
+      dta1$self_reference_max_shares_imp[i] <- 1
+    }
+  }
+
+```
+
+
+###fine tuning of LHS
+```{r}
+summary(dta1$shares)
+d <- density(dta1$shares)
+plot(d)
+
+d <- density(log(dta1$shares))
+plot(d)
+
+summary(log(dta1$shares))
+
+dta1 <- dta1 %>%
+  mutate(log_shares= log(shares))
+```
+
+
+### Split train/test (could do CV etc.)
+```{r}
+names(dta1)
+remove_indexes <- c(58:67)
+dta1 <- dta1[, -remove_indexes]
+
+set.seed(123) 
+N <- nrow(dta1) 
+idx_train <- sample(1:N,N/2) 
+idx_valid <- sample(base::setdiff(1:N, idx_train), N/4) 
+idx_test <- base::setdiff(base::setdiff(1:N, idx_train),idx_valid) 
+d_train <- dta1[idx_train,]
+d_valid <- dta1[idx_valid,]
+d_test  <- dta1[idx_test,]
+
+```
+
+Modeling
+--------
+```{r}
+library(randomForest)
+md <- randomForest(log_shares ~kw_avg_avg + kw_max_avg + self_reference_avg_sharess + timedelta + LDA_02 + LDA_04 + kw_avg_max + kw_avg_min + self_reference_min_shares + LDA_00 + LDA_01, data = d_train, ntree = 100)
+md
+plot(md)
+
+phat <- predict(md, d_test)
+
+f1 <- as.data.frame( d_test$log_shares)
+f2 <- as.data.frame (phat)
+f <- cbind(f1, f2)
+names(f) <- c('shares', 'pred')
+mean_squared_eror <- sqrt(mean((f$shares - f$pred)^2))
+
+
+md <- randomForest(cnt ~ ., data = d_train, ntree = 100, importance = TRUE)
+varImpPlot(md)
+z <-as.data.frame (importance(md))
+
+z %>%
+  arrange(desc(IncNodePurity))%>%
+  head(12) %>%
+  rownames()
+
+row.names(z)
+importance(md, type=2)
+
+```
+
+
+
+[H2O](http://h2o.ai/) is a powerful open source machine learning platform with R API
+
+### Setup
+
+```{r}
+
+library(h2o)
+
+h2o.init(max_mem_size = '2g', nthreads = -1)   
+
+dx_train <- as.h2o(d_train)  
+dx_valid <- as.h2o(d_valid)
+dx_test <- as.h2o(d_test)
+
+```
+
+You can see/check/examine the data in the H2O (Web-based) 
+UI (flow) http://localhost:54321 (or appropriate host)
+
+
+
+### Random forest
+
+```{r}
+
+
+rf_md <- h2o.randomForest(x = kw_avg_avg + kw_max_avg + self_reference_avg_sharess + timedelta + LDA_02 + LDA_04 + kw_avg_max + kw_avg_min + self_reference_min_shares + LDA_00 + LDA_01, y = 58, 
+            training_frame = dx_train, 
+            mtries = -1, ntrees = 100, max_depth = 50, nbins = 200)
+
+rf_md
+h2o.performance(rf_md, dx_test)
+
+```
+
+
+### GBM
+
+```{r results='hide'}
+
+
+gbm_md <- h2o.gbm(x = 1:57, y = 58, 
+        training_frame = dx_train, validation_frame = dx_valid,
+        max_depth = 200, ntrees = 100, learn_rate = 0.01, nbins = 200,
+        stopping_rounds = 3, stopping_tolerance = 1e-3)
+
+
+gbm_md
+h2o.performance(gbm_md, dx_test)
+
+```
+
+
+
+
+### GBM with cross validation
+
+```{r}
+
+  gbm_cv_md <- h2o.gbm(x = 1:57, y = 58, 
+          training_frame = dx_train, 
+          max_depth = 15, ntrees = 500, learn_rate = 0.01, nbins = 200,
+          nfolds = 5,
+          stopping_rounds = 3, stopping_tolerance = 1e-3)
+gbm_cv_md
+h2o.performance(gbm_cv_md, dx_test)
+
+```
+
+
+
+### GBM with grid search
+
+```{r}
+
+
+  gmb_gs_md <- h2o.grid('gbm', x = 1:10, y = 11, 
+            training_frame = dx_train, validation_frame = dx_valid,
+            hyper_params = list(ntrees = 500,
+                                max_depth = c(5,10,20),
+                                learn_rate = c(0.01,0.1),
+                                nbins = 200),
+            stopping_rounds = 5, stopping_tolerance = 1e-3)
+            
+gmb_gs_md
+
+
+
+```
+
+```{r}
+
+
+result <-
+do.call(rbind, lapply(gmb_gs_md@model_ids, function(m_id) {
+  mm <- h2o.getModel(m_id)
+  hyper_params <- mm@allparameters
+  data.frame(m_id = m_id, 
+             mse = h2o.performance(mm, dx_test)@metrics$MSE,
+             max_depth = hyper_params$max_depth,
+             learn_rate = hyper_params$learn_rate )
+})) %>% arrange(mse)
+result[,-1 ]
+
+```
+
+
+
+### Neural network
+
+```{r}
+
+
+  NN_md <- h2o.deeplearning(x = 1:10, y = 11, 
+          training_frame = dx_train, validation_frame = dx_valid,
+          activation = 'Rectifier', hidden = c(200,200), epochs = 100,
+          stopping_rounds = 3, stopping_tolerance = 0)
+
+NN_md
+
+h2o.mse(NN_md)
+h2o.mse(h2o.performance(NN_md, dx_test))
+
+```
+
+
+### Neural network with regularization (L1, L2, dropout)
+
+```{r}
+
+system.time({
+  NN_wr_md <- h2o.deeplearning(x = 1:10, y = 11, 
+          training_frame = dx_train, validation_frame = dx_valid,
+          activation = 'RectifierWithDropout', hidden = c(200,200), epochs = 100,
+          input_dropout_ratio = 0.2, hidden_dropout_ratios = c(0.2,0.2),
+          l1 = 1e-4, l2 = 1e-4,
+          stopping_rounds = 3, stopping_tolerance = 0)
+})
+
+```
+
+```{r}
+
+NN_wr_md
+
+h2o.mse(NN_wr_md)
+h2o.mse(h2o.performance(NN_wr_md, dx_test))
+
+```

@@ -1,0 +1,444 @@
+---
+title: "DA02_HA03_Budai_Zsoldos_Turkey"
+author: "Sandor Budai & Istvan Zsoldos"
+date: "2016. February 9."
+output: html_document
+  pdf_document:
+    toc: yes
+  word_document: default
+    toc: yes
+  html_document:
+    highlight: tango
+    number_sections: yes
+    theme: united
+    toc: yes
+---
+
+```{r warning = FALSE, message = FALSE, results = 'hide'}
+#Sys.setlocale("LC_TIME", "English")
+#setwd('/home/sbudai/Dokumentumok/R_stuff')
+library(ggplot2)
+library(dplyr)
+library(data.table)
+library(pander)
+library(rsdmx)
+library(reshape2)
+library(scales)
+library(sandwich)
+library(urca) 
+library(stargazer)
+library(Rmisc)
+library(rmarkdown)
+library(vars)
+
+
+calculate_se <- function(lm_model, se = 'robust', max_lag) 
+  {
+    if (!se %in% c('traditional', 'robust', 'newey-west')) stop ('se should be one of traditional, robust or newey-west (default is robust).')
+    if (!require(sandwich)) stop('Required sandwich package is missing.')
+    if (se == 'robust') {sqrt(diag(vcovHC(lm_model, type="HC1")))}
+      else if (se == 'newey-west') {sqrt(diag(NeweyWest(lm_model, lag = max_lag, prewhite = FALSE)))} 
+        else {sqrt(diag(vcov(lm_model)))}
+  }
+
+summary_r <- function(model, se = 'robust', max_lag = 0, ...) 
+  {
+    sumry <- summary(model)
+    table <- coef(sumry)
+    table[, 2] <- calculate_se(model, se, max_lag)
+    table[, 3] <- table[,1]/table[, 2]
+    table[, 4] <- 2*pt(abs(table[, 3]), df.residual(model), lower.tail=FALSE)
+    sumry$coefficients <- table
+    p <- nrow(table)
+    if (p > 1) {if (se == 'robust') 
+      {hyp <- cbind(0, diag(p - 1))    
+       sumry$fstatistic[1] <- linearHypothesis(model, hyp, white.adjust='hc1')[2, 'F']}
+      else if (se == 'newey-west') {sumry$fstatistic[1] <- NA}
+      }
+    print(sumry)
+    cat('Number of observations:', length(residuals(model)), '\n\n')
+    if (se == 'robust') {cat('Note: Heteroscedasticity-consistent standard errors (adjustment HC1)\n')}
+      else if (se == 'newey-west') {cat('Note: Newey-West standard errors - maximum lag:', max_lag, '\n')}
+  }
+
+stargazer_r <- function(list_of_models, type='text', align=TRUE, no.space=TRUE,
+                        omit.stat=c('LL', 'aic', 'ser', 'f', 'adj.rsq', 'sigma2'), 
+                        se = 'robust', max_lag = 0, ...) 
+  {
+    if (!require(stargazer)) stop('Required stargazer package is missing.')
+    if (class(type) != 'character') stop('Different models should be given in a list.')
+    if (class(list_of_models) == "lm") list_of_models <- list(list_of_models)
+    if (!length(se) %in% c(1, length(list_of_models))) stop('For parameter se you should give one string (if you want to apply it to all models) or a list of strings (if you want to apply different types of standard error for the different models). The string could take traditional, robust, and newey-west (default is robust).')
+    if (length(se) == 1) 
+      { note <- paste(capwords(se[[1]]), 'standard errors in parentheses')
+        se <- as.list(rep(se[[1]], length(list_of_models)))} 
+      else {note <- 'Standard errors in parentheses'}
+    if (length(max_lag) == 1) 
+      { max_lag <- as.list(rep(max_lag[[1]], length(list_of_models)))
+        if (all(se == 'newey-west')) {note <- paste(note, '- max lag:', max_lag[[1]])}
+      }
+    if (any(se == 'newey-west')) omit.stat <- c(omit.stat, 'rsq')
+    list_se_robust <- lapply(seq_along(list_of_models), 
+                             function(j) {if (class(list_of_models[[j]]) == 'lm') 
+                                             {calculate_se(list_of_models[[j]], se = se[[j]], max_lag = max_lag[[j]])}
+                                             else {NULL}
+                                          }
+                             )
+    args <- list(...)
+    if (!is.null(args[['out']])) type='html'
+    stargazer(list_of_models, se = list_se_robust, report = 'vcs*', notes = note, type = type, 
+              align = align, omit.stat = omit.stat, no.space = no.space, ...)
+  }
+
+
+pperron <- function(x, model = c('constant', 'trend'), type = 'Z-tau') 
+  {
+    if (!require(urca)) stop('Required urca package is missing.')
+    results <- ur.pp(x, type = type, model = model)
+    print(results)
+    model <- match.arg(model)
+    if (model == 'trend') trend = 'ct' else trend = 'c' 
+    cat('MacKinnon approximate p-value for Z-tau:', punitroot(results@teststat, trend = trend), '\n\n')
+  }
+
+capwords <- function(s, strict = FALSE) 
+  {
+    cap <- function(s) 
+    paste(toupper(substring(s, 1, 1)), {s <- substring(s, 2); if(strict) tolower(s) else s}, sep = '', collapse = '-')
+    sapply(strsplit(s, split = "-"), cap, USE.NAMES = !is.null(names(s)))
+  }
+
+lags <- function(variable, lags) 
+    {
+      # create lags of a variable for a regression as string
+      var_string <- deparse(substitute(variable))
+      paste(lapply(lags, function(i) {paste0('lag(', var_string, ',' , i, ')')}), collapse = '+')
+    }
+
+d <- function(x) {c(NA, diff(x))}
+
+Arima <- function(..., transform.pars = FALSE) 
+  {
+    model <- arima(...)
+    # rename to be consistent with lm
+    names(model$coef) <- gsub('intercept', '(Intercept)', names(model$coef))
+    row.names(model$var.coef) <- gsub('intercept', '(Intercept)', row.names(model$var.coef))
+    colnames(model$var.coef) <- gsub('intercept', '(Intercept)', colnames(model$var.coef))
+    model
+  }
+```
+
+### Download and transform data
+```{r warning = FALSE, message = FALSE}
+ex_url <- 'http://stats.oecd.org/restsdmx/sdmx.ashx/GetData/MEI_FIN/CCUS.TUR.A+Q+M/all?startTime=1957&endTime=2015'
+ex_xml_data <- readSDMX(ex_url)
+ex <- data.table(as.data.frame(ex_xml_data))
+ex <- ex[FREQUENCY == 'Q',]
+ex <- ex[order(obsTime)]
+ex <- ex[, .(obsTime, obsValue, UNIT)]
+names(ex) <- c('obsTime','EXC','EXC_UNIT')
+
+gdp_url <- 'http://stats.oecd.org/restsdmx/sdmx.ashx/GetData/MEI/TUR.NAEXCP+NAEXCP01+NAEXKP+NAEXKP01.ST+STSA+IXOB+IXOBSA+ML+MLSA+QL+QLSA+NCML+NCMLSA+NCCU+NCCUSA+CXML+CXMLSA+CXQLSA+CXCU+CXCUSA+IXNSA+GP+GPSA+GY+GYSA+IXPY.A+Q+M/all?startTime=1957&endTime=2015'
+gdp_xml_data <- readSDMX(gdp_url)
+gdp <- data.table(as.data.frame(gdp_xml_data))
+gdp <- gdp[MEASURE == 'IXOBSA', ] ##
+gdp <- gdp[FREQUENCY == 'Q', ] ##
+gdp <- gdp[order(obsTime)]
+gdp <- gdp[, .(obsTime, obsValue, UNIT, MEASURE)]
+names(gdp) <- c('obsTime','GDP', 'GDP_UNIT', 'GDP_MEASURE')
+dt <- merge(ex, gdp, by = 'obsTime')
+```
+
+
+### Plotting GDP & Turkish Lira exchange rate over time
+```{r warning = FALSE}
+plot1 <- ggplot(dt) +
+    geom_line(aes(x = dt[, obsTime], y = dt[, GDP]), group = 1, col = 'brown') +
+    ggtitle('Turkish GDP') + xlab('time') + ylab('IDX') +
+    theme_minimal() +
+    theme(axis.text.x = element_blank())
+plot2 <- ggplot(dt) +
+    geom_line(aes(x = dt[, obsTime], y = dt[, EXC]), group = 2, col = 'blue') +
+    ggtitle('Turkish Lira exchange rate') + xlab('time') + ylab('NATUSD') +
+    theme_minimal() +
+    theme(axis.text.x = element_blank())
+multiplot(plot1, plot2, cols=2)
+```
+
+### Check stationarity of GDP
+```{r warning = FALSE}
+pander(PP.test(dt$GDP)) 
+pander(pperron(dt$GDP))
+```
+#### We cannot reject the null of GDP having a unit root
+
+### Check stationarity of Turkish Lira exchange rate
+```{r warning = FALSE}
+pander(PP.test(dt$EXC))
+pander(pperron(dt$EXC))
+```
+#### We cannot reject the null of exchange rate having a unit root
+
+
+### Plotting log(GDP) & log(Turkish Lira exchange rate) over time
+```{r warning = FALSE}
+plot3 <- ggplot(dt) +
+    geom_line(aes(x = dt[, obsTime], y = dt[, log(GDP)]), group = 1, col = 'brown') +
+    ggtitle('Turkish GDP') + xlab('time') + ylab('log(IDX)') +
+    theme_minimal() +
+    theme(axis.text.x = element_blank())
+plot4 <- ggplot(dt) +
+    geom_line(aes(x = dt[, obsTime], y = dt[, log(EXC)]), group = 2, col = 'blue') +
+    ggtitle('Turkish Lira exchange rate') + xlab('time') + ylab('log(NATUSD)') +
+    theme_minimal() +
+    theme(axis.text.x = element_blank())
+multiplot(plot3, plot4, cols=2)
+```
+
+### Check stationarity of log(GDP)
+```{r warning = FALSE}
+pander(PP.test(log(dt$GDP))) 
+pander(pperron(log(dt$GDP)))
+```
+#### We cannot reject the null of log(GDP) having a unit root
+
+### Check stationarity of log(Turkish Lira exchange rate)
+```{r warning = FALSE}
+pander(PP.test(log(dt$EXC)))
+pander(pperron(log(dt$EXC)))
+```
+#### We cannot reject the null of log(exchange rate) having a unit root
+
+
+
+### Plotting log(GDP) difference & log(Turkish Lira exchange rate) difference over time
+```{r warning = FALSE}
+dt[, ln_GDP_diff := log(GDP) - shift(log(GDP), n = 1, fill = NA, type = 'lag')]
+dt[, ln_EXC_diff := log(EXC) - shift(log(EXC), n = 1, fill = NA, type = 'lag')]
+
+plot5 <- ggplot(dt) +
+    geom_line(aes(x = dt[, obsTime], y = dt[, ln_GDP_diff]), group = 1, col = 'brown') +
+    ggtitle('Turkish GDP') + xlab('time') + ylab('IDX difference') +
+    theme_minimal() +
+    theme(axis.text.x = element_blank())
+plot6 <- ggplot(dt) +
+    geom_line(aes(x = dt[, obsTime], y = dt[, ln_EXC_diff]), group = 2, col = 'blue') +
+    ggtitle('Turkish Lira exchange rate') + xlab('time') + ylab('NATUSD difference') +
+    theme_minimal() +
+    theme(axis.text.x = element_blank())
+multiplot(plot5, plot6, cols=2)
+```
+
+### Check stationarity of GDP difference
+```{r warning = FALSE}
+pander(PP.test(dt$ln_GDP_diff[-1]))
+pander(pperron(dt$ln_GDP_diff[-1]))
+```
+#### We can reject the null with high confidence, the GDP difference has NO unit root, so stationary.
+
+
+### Check stationarity of Turkish Lira exchange rate difference
+```{r warning = FALSE}
+pander(PP.test(dt$ln_EXC_diff[-1])) 
+pander(pperron(dt$ln_EXC_diff[-1])) 
+```
+#### We can reject the nullwith high confidence, the Turkish Lira exchange rate difference has NO unit root, so stationary.
+
+
+### Checking trends of ln_GDP_diff and ln_EXC_diff
+```{r warning = FALSE}
+fit1 <- lm(formula = d(ln_GDP_diff) ~ 1, data = dt) # EgyĂˇltalĂˇn nem vagyok biztos benne, hogy Ă­gy kell csinĂˇlni.
+fit2 <- lm(formula = d(ln_EXC_diff) ~ 1, data = dt) # EgyĂˇltalĂˇn nem vagyok biztos benne, hogy Ă­gy kell csinĂˇlni.
+
+stargazer_r(list(fit1, fit2), se = 'newey-west', max_lag = 9, digits = 2, omit.stat=c('LL', 'aic', 'ser', 'f', 'adj.rsq', 'rsq'))
+```
+#### Constants are not significantly different from zero in either regression >> There is no trend in ln_GDP_diff and ln_EXC_diff.
+
+
+### Checking seasonality
+```{r warning = FALSE}
+dt[, Q1 := ifelse(substr(obsTime, 6, 7) == 'Q1', 1, 0)]
+dt[, Q2 := ifelse(substr(obsTime, 6, 7) == 'Q2', 1, 0)]
+dt[, Q3 := ifelse(substr(obsTime, 6, 7) == 'Q3', 1, 0)]
+
+fit3 <- lm(formula = ln_GDP_diff ~ Q1 + Q2 + Q3, data = dt)
+pander(fit3)
+fit4 <- lm(formula = ln_EXC_diff ~ Q1 + Q2 + Q3, data = dt)
+pander(fit4)
+```
+#### There are no significant seasonal dummy variables, so there is no seasonality.
+
+
+### Regression ln_GDP_diff on ln_EXC_diff on the same quater (and seasonal dummies)
+```{r warning = FALSE}
+fit5 <- lm(formula = ln_GDP_diff ~ ln_EXC_diff, data = dt)
+fit6 <- lm(formula = ln_GDP_diff ~ ln_EXC_diff + factor(Q1) + factor(Q2) + factor(Q3), data = dt)
+
+stargazer_r(
+    list(fit5,fit5, fit5, fit5, fit6), 
+    se = list('robust', 'newey-west', 'newey-west', 'newey-west', 'newey-west'),
+    max_lag = list(NA, 1, 5, 9, 9),
+    digits = 2,
+    omit.stat=c("LL", "aic", "ser", "f", "adj.rsq", "rsq"),
+    dep.var.caption = 'LHS: change in log(GDP)',
+    dep.var.labels.include = FALSE,
+    column.labels = c('robust SE', 'NW SE, lags 1', 'NW SE, lags 5', 'NW SE, lags 9', 'NW SE, lags 9')
+            )
+```
+#### Seasonal dummies are not significant and it does not really matter what the number of lags in NW SE estimation are. We will drop seasonal dummies in the following
+#### In quarters with one more percent US$ exchange rate increase, Turkish GDP growth is lower by 0.13 percentage point on average relative to quarters with one less percent change in the US$ exchange rate. If we add quarterly seasonal dummies to the regression,the results are very similar.
+
+
+###dynamic lag analysis
+```{r warning = FALSE}
+
+#first with 4 lags (1 year)
+fit_dynlag4<-lm(
+    as.formula(
+        paste("ln_GDP_diff ~ ", lags(ln_EXC_diff, 0:4))
+    ), 
+    data = dt
+)
+
+pander(fit_dynlag4)
+
+#to find out the cumulative association
+fit_dynlag4_cum<-lm(
+    as.formula(
+        paste("ln_GDP_diff ~ ", lags(d(ln_EXC_diff), 0:3),"+lag(log(EXC),4)")
+    ), 
+    data = dt
+)
+
+pander(fit_dynlag4_cum)
+
+#now ith 9 lags (more than 2 years)
+fit_dynlag9<-lm(
+    as.formula(
+        paste("ln_GDP_diff ~ ", lags(ln_EXC_diff, 0:9))
+    ), 
+    data = dt
+)
+
+pander(fit_dynlag9)
+
+#to find out the cumulative association
+fit_dynlag9_cum<-lm(
+    as.formula(
+        paste("ln_GDP_diff ~ ", lags(d(ln_EXC_diff), 0:8),"+lag(log(EXC),9)")
+    ), 
+    data = dt
+)
+
+pander(fit_dynlag9_cum)
+
+```
+###interpretation: only the contemporaneous effect (lag=0) of the exchange rate is significant statistically, large and negative (meaning that a 1% larger depreciation is associated with a 0.12-0.15 percentage point lower GDP growth.
+
+###The cumulative impact is small and positive, because as time goes by, negative coefficients are followed by positive ones 
+
+
+###VAR analysis
+```{r warning = FALSE}
+
+
+Irf <- function(...) {  # to calculate simple IRF instead of orthogonal by default
+    irf(..., ortho = FALSE)
+}
+
+var_data <- dt %>% select(ln_GDP_diff, ln_EXC_diff) %>% na.omit()
+
+#with one lag
+var1 <- VAR(var_data, p = 1)
+summary(var1)
+plot(Irf(var1, impulse = 'ln_EXC_diff', response = 'ln_GDP_diff'))
+plot(Irf(var1, impulse = 'ln_GDP_diff', response = 'ln_EXC_diff'))
+
+#with 5 lags
+var5 <- VAR(var_data, p = 5)
+summary(var5)
+plot(Irf(var5, impulse = 'ln_EXC_diff', response = 'ln_GDP_diff'))
+plot(Irf(var5, impulse = 'ln_GDP_diff', response = 'ln_EXC_diff'))
+
+```
+###interpretation: VARs are not impressive (95% band is on both sides of zero). Initially, lagged exchange rate weakness is associated with somewhat weaker GDP growth, and vice versa.
+
+###overall interpretation is that beyond the contemporenious effect, there is a weak and statistically not significant interaction between the exchange rate and GDP growth. The contemporaneous effect may come from third variables (financial shocks for example)
+
+######END####
+
+
+
+
+
+
+### Regression ln_GDP_diff on ln_EXC_diff with 1 quater lagged (and seasonal dummies)
+```{r warning = FALSE}
+fit7 <- lm(formula = ln_GDP_diff ~ ln_EXC_diff + lag(ln_EXC_diff), data = dt)
+fit8 <- lm(formula = ln_GDP_diff ~ ln_EXC_diff + lag(ln_EXC_diff) + factor(Q1) + factor(Q2) + factor(Q3), data = dt)
+stargazer_r(
+    list(fit7, fit7, fit7, fit7, fit8), 
+    se = list('robust', 'newey-west', 'newey-west', 'newey-west', 'newey-west'),
+    max_lag = list(NA, 1, 5, 9, 9),
+    digits = 2,
+    omit.stat=c("LL", "aic", "ser", "f", "adj.rsq", "rsq"),
+    dep.var.caption = 'LHS: change in log(GDP)',
+    dep.var.labels.include = FALSE,
+    column.labels = c('robust SE', 'NW SE, lags 1', 'NW SE, lags 5', 'NW SE, lags 9', 'NW SE, lags 9')
+            )
+```
+#### The Q4 dummy is significant but does not really matter the number of lags in NW SE estimation.
+#### In quarters with one more percent US$ exchange rate difference increase the level of Turkish GDP difference lessen by an additional 13% on average relative to quarters with one less percent US$ exchange rate difference. 
+#### In quarters with one more percent US$ exchange rate difference increase the level of Turkish GDP difference in the next quarter does not change on average relative to quarters with one less percent US$ exchange rate difference. 
+#### If we take into consideration the binary variables for the first 3 quarters on RHS then the results were the very similar.
+#### If we take into consideration the Q4 binary variable then in Q4 quarters with one more percent US$ exchange rate difference increase the level of Turkish GDP difference increases by an additional 0.012% on average relative to quarters with one less percent US$ exchange rate difference. 
+
+
+### Regression ln_GDP_diff on ln_EXC_diff with 9 quater lagged (and seasonal dummies)
+```{r warning = FALSE}
+fit9 <- lm(formula = ln_GDP_diff ~ ln_EXC_diff + lag(ln_EXC_diff), data = dt)
+# with automatic lag inclusion
+fit9 <- lm(as.formula(paste('ln_GDP_diff ~ ', lags(ln_EXC_diff, 0:1))), data = dt)
+# everything together
+max_lag <- list(1, 2, 5, 9)
+fits <- lapply(X = max_lag, function(l) {lm(as.formula(paste('ln_GDP_diff ~', lags(ln_EXC_diff, 0:l))), data = dt)})
+fit10 <- lm(as.formula(paste('ln_GDP_diff ~', lags(ln_EXC_diff, 0:9), '+ Q1 + Q2 + Q3')), data = dt)
+fits[[5]] <- fit10
+stargazer_r(
+    fits, 
+    se = 'newey-west',
+    max_lag = 9,
+    digits = 2,
+    omit.stat=c("LL", "aic", "ser", "f", "adj.rsq", "rsq"),
+    dep.var.caption = 'LHS: % change in price',
+    dep.var.labels.include = FALSE,
+    column.labels = c(sapply(max_lag, function(l) paste0("L(", l, ")")), "L(9)")
+            )
+
+fits2 <- summary(fits[[5]])
+df <- data.frame()
+df <- cbind(df, fits2$coefficients[, 0])
+
+df <- cbind(df, fits2$coefficients[, 1] - 2*abs(fits2$coefficients[, 2]))
+df <- cbind(df, fits2$coefficients[, 1])
+df <- cbind(df, fits2$coefficients[, 1] + 2*abs(fits2$coefficients[, 2]))
+
+ggplot(data = df) +
+  geom_line(aes(y = df$1, x= ))
+  , lcl, ucl)
+
+
+```
+#### Coefficients on the 1st, 3nd, 4th and 7th lags are negative. Only the 7th lag is statistically significant.
+#### Coefficients on the 5th, 6th and 7th lags are statistically significant. 
+#### It seems like that in quarters following quarters by 5 period with one additional percent US$ exchange rate difference the level of Turkish GDP difference rose by an additional 0.06% on average relative to quarters that followed quarters by 5 period with one less percent US$ exchange rate difference.
+#### It seems like that in quarters following quarters by 6 period with one additional percent US$ exchange rate difference the level of Turkish GDP difference rose by an additional 0.04% on average relative to quarters that followed quarters by 6 period with one less percent US$ exchange rate difference.
+#### It seems like that in quarters following quarters by 7 period with one additional percent US$ exchange rate difference the level of Turkish GDP difference decreased by an additional 0.04% on average relative to quarters that followed quarters by 7 period with one less percent US$ exchange rate difference.
+#### This are in addition to the contemporaneous association: within the quarter with one more percent US$ exchange rate difference the level of Turkish GDP difference decreased by an additional 0.15% on average relative to a month with one less percent US$ exchange rate difference.
+#### If we take into consideration the Q4 binary variable then in Q4 quarters with one more percent US$ exchange rate difference increase the level of Turkish GDP difference increases by an additional 0.01% on average relative to quarters with one less percent US$ exchange rate difference. 
+
+
+#### ...
+```{r warning = FALSE}
+
+```
